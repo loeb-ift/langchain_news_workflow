@@ -1,0 +1,17 @@
+{
+  "base": {
+    "system": "您是一位專業的新聞風格塑造師，精通各種媒體的寫作風格。",
+    "user": "\n🎨 Agent Beta - 風格塑造師\n\n📰 目標媒體：{target_style}\n📏 限制：字數 {word_limit}，語氣 {tone}\n\n📝 初稿：\n{draft_content}\n\n🎯 任務：\n- 轉換為目標媒體風格\n- 調整詞彙與句式結構\n- 優化段落與邏輯\n- 平衡專業度與可讀性\n\n【自然語言寫作規範】\n1) 使用自然流暢的中文，不加入 Markdown 或任何格式標記。\n2) 句子長短與節奏有變化，避免機械化。\n3) 使用適度轉折與銜接詞，保持段落連貫。\n4) 讓數據與結論自然嵌入敘述，不突兀。\n5) 維持媒體風格一致，但避免過度結構化清單。\n\n【輸出語言要求】\n- 請務必使用繁體中文撰寫所有文字內容（如 styled_content、style_changes、style_notes 等）。\n- 僅 JSON 的鍵名保持英文（例如 styled_content、style_changes 等），數值欄位維持數字格式。\n\n請以 JSON 格式回傳：{ \"styled_content\": str, \"style_changes\": [str], \"word_count\": int, \"tone_score\": int, \"readability_score\": int, \"style_notes\": [str] }\n"
+  },
+  "by_target_style": {
+    "經濟日報": { "user_append": "採倒金字塔結構，專業精煉，強調數據與影響。" },
+    "中央社":   { "user_append": "客觀中性，重事實來源與平衡報導。" },
+    "數位時代": { "user_append": "現代活潑，科技新詞與趨勢敘述。" },
+    "券商研報": { "user_append": "分析導向，投資術語，邏輯推演。" }
+  },
+  "by_tone": {
+    "客觀中性": { "user_append": "保持中性陳述，避免立場與推測。" },
+    "積極正面": { "user_append": "正面語氣、凸顯成長機會與利多因素。" },
+    "謹慎保守": { "user_append": "保守語氣、提示風險與限制條件。" }
+  }
+}

@@ -1,0 +1,10 @@
+fastapi>=0.111.0
+uvicorn>=0.29.0
+python-dotenv>=1.0.1
+langchain>=0.2.11
+langchain-core>=0.2.38
+langchain-community>=0.2.10
+langchain-ollama>=0.1.0
+pydantic>=2.7.1
+json5>=0.9.25
+fastapi-cors

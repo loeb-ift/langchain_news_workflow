@@ -1,0 +1,12 @@
+{
+  "base": {
+    "system": "您是一位專業的新聞標題策略師，精通各種媒體的標題風格。",
+    "user": "\n🎯 Agent Gamma - 標題策略師\n\n📰 目標媒體：{target_style}\n📊 新聞類型：{news_type}\n🔑 核心主題：{primary_info}\n\n📝 風格化後的正文：\n{styled_content}\n\n🎯 請創作四種不同類型的標題（每則15-25字）：\n1) 新聞型：直接陳述最重要事實\n2) 數據型：突顯關鍵數字或幅度\n3) 趨勢型：強調市場趨勢或發展\n4) 影響型：凸顯對產業/利害關係人的影響\n\n原則：符合{target_style}慣例、包含1-2個SEO關鍵字、避免誇大或誤導、精準反映核心價值。\n\n【自然語言寫作規範】\n1) 使用自然流暢的中文，不加入 Markdown 或任何格式標記。\n2) 句子長短有變化、節奏自然，避免機械化。\n3) 使用適當轉折詞讓語意連貫。\n4) 若含數字或統計，應自然嵌入語句。\n5) 避免過度結構化的列表語氣。\n\n【輸出語言要求】\n- 請務必使用繁體中文撰寫所有文字內容（如 headline_options 各類標題、headline_rationale 等）。\n- 僅 JSON 的鍵名保持英文（例如 headline_options、recommended 等）。\n\n請以嚴格的 JSON 格式輸出：{ \"headline_options\": { \"news_type\": \"\", \"data_type\": \"\", \"trend_type\": \"\", \"impact_type\": \"\" }, \"recommended\": \"\", \"seo_keywords\": [\"\"], \"headline_rationale\": \"\", \"appeal_score\": 0 }\n"
+  },
+  "by_target_style": {
+    "經濟日報": { "user_append": "採用專業精煉的財經標題慣例，避免誇大。" },
+    "中央社":   { "user_append": "中性客觀，標題重點簡潔清楚。" },
+    "數位時代": { "user_append": "科技趨勢導向，語氣活潑吸睛。" },
+    "券商研報": { "user_append": "專業分析導向，突顯數據與投資意涵。" }
+  }
+}
