@@ -126,9 +126,9 @@ def run_stage(stage_name: str, prompt: Dict[str, str], llm: ChatOllama) -> Tuple
         elif stage_name == "beta":
             fallback = {"styled_content": text[:800], "style_changes": [], "word_count": len(text[:800]), "tone_score": 0, "readability_score": 0, "style_notes": [], "quality_score": 0, "needs_retry": True}
         elif stage_name == "gamma":
-            fallback = {"headline_options": {}, "recommended": "", "seo_keywords": [], "headline_rationale": text[:300], "appeal_score": 0, "quality_score": 0, "needs_retry": True}
+            fallback = {"headline_options": {}, "recommended": "[標題生成失敗]", "seo_keywords": [], "headline_rationale": text[:300], "appeal_score": 0, "quality_score": 0, "needs_retry": True}
         elif stage_name == "delta":
-            fallback = {"final_content": text[:1200], "selected_headline": "", "quality_report": {"word_count": 0, "compliance_check": "非 JSON 回傳，使用降級內容。", "readability_score": 0, "professionalism_score": 0, "issues_found": ["模型未嚴格輸出 JSON"], "corrections_made": []}, "publish_ready": False}
+            fallback = {"final_body": text[:1200], "best_title": "[標題生成失敗]", "quality_report": {"word_count": len(text[:1200]), "compliance_check": "非 JSON 回傳，使用降級內容。", "readability_score": 50, "professionalism_score": 50, "issues_found": ["模型未嚴格輸出 JSON"], "corrections_made": []}, "publishable": False}
         else:
             fallback = {"error": "JSON 解析失敗", "raw": text[:500]}
         return fallback, response_text
