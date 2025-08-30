@@ -9,7 +9,7 @@
 ## 功能特色
 
 - **四階段處理流程**：
-  - **Alpha (資訊架e構師)**：將原始資料轉為結構化的新聞初稿。
+  - **Alpha (資訊架構師)**：將原始資料轉為結構化的新聞初稿。
   - **Beta (風格塑造師)**：將初稿依據指定風格（如：經濟日報、數位時代）進行改寫。
   - **Gamma (標題策略師)**：產生多種類型（新聞型、數據型等）的標題選項。
   - **Delta (品質守門員)**：進行最終的品質審核、修正與定稿。
@@ -17,20 +17,47 @@
 - **可配置性**：支援透過命令列參數調整新聞類型、目標風格、語氣、字數等。
 - **本地模型支援**：使用 [Ollama](https://ollama.com/) 在本地端運行語言模型，無需依賴 OpenAI 等雲端服務。
 - **決策日誌**：可選擇性地將每次執行的決策過程記錄下來，存成 `pipeline_log.csv` 檔案，便於分析與追蹤。
+- **Web UI 介面**：透過 Gradio 提供友好的使用者介面，簡化操作流程。
+- **測試框架**：包含完整的單元測試和集成測試，確保程式穩定性。
 
 ## 檔案結構
 
 ```
 .
-├── app_utils/          # 共用工具模組
-│   ├── prompt_manager.py # 提示詞管理
-│   └── ui_texts.py       # UI 文字管理
-├── prompts/              # AI 提示詞模板 (JSON 格式)
-├── article.txt           # 輸入的原始文章範例
-├── pipeline.py           # 主要的互動式新聞生成腳本
-├── pipeline_log.py       # 帶有日誌記錄功能的版本
-├── pipeline_log.csv      # 儲存決策過程的日誌檔案
-└── README.md             # 本說明檔案
+├── .env                   # 環境變數設定檔
+├── .env.example           # 環境變數範例檔
+├── README.md              # 專案說明文件
+├── app_utils/             # 共用工具模組
+│   ├── json_utils.py      # JSON 處理工具
+│   ├── ollama_utils.py    # Ollama 模型交互工具
+│   ├── prompt_manager.py  # 提示詞管理
+│   ├── ui_texts.json      # UI 文字配置
+│   └── ui_texts.py        # UI 文字管理
+├── article.txt            # 輸入的原始文章範例
+├── backend/               # 後端服務
+│   ├── main.py            # 後端主程式
+│   └── requirements.txt   # 後端依賴
+├── gradio_app.py          # Gradio Web UI 界面
+├── logs/                  # 日誌存儲
+│   ├── details/           # 詳細日誌 JSON 檔
+│   └── run.csv            # 運行記錄 CSV
+├── pipeline.py            # 主要的互動式新聞生成腳本
+├── pipeline_log.py        # 帶有日誌記錄功能的版本
+├── pipeline_log.csv       # 儲存決策過程的日誌檔案
+├── prompts/               # AI 提示詞模板 (JSON 格式)
+│   ├── alpha.json         # Alpha 階段提示詞
+│   ├── beta.json          # Beta 階段提示詞
+│   ├── delta.json         # Delta 階段提示詞
+│   ├── gamma.json         # Gamma 階段提示詞
+│   └── overrides/         # 提示詞覆蓋配置
+├── requirements.txt       # Python 套件依賴
+├── server.py              # 後端伺服器啟動腳本
+└── tests/                 # 測試用例
+    ├── conftest.py        # 測試配置
+    ├── smoke_test.py      # 煙霧測試
+    ├── test_edge_cases.py # 邊界條件測試
+    ├── test_pipeline_mock.py  # 模擬模式測試
+    └── test_pipeline_variations.py  # 變化場景測試
 ```
 
 ## 環境設定
@@ -63,11 +90,23 @@
 
 ## 使用說明
 
-本專案提供兩種執行模式：
+本專案提供三種執行模式：
 
-### 1. 標準互動流程 (`pipeline.py`)
+### 1. Web UI 介面 (`gradio_app.py`)
 
-這是主要的執行腳本，提供完整的互動式體驗。
+提供友好的圖形化界面，適合初學者使用。
+
+**啟動指令：**
+
+```bash
+python gradio_app.py
+```
+
+啟動後，將自動開啟瀏覽器顯示 Web 介面，或手動訪問 http://localhost:7860
+
+### 2. 標準互動流程 (`pipeline.py`)
+
+命令列互動模式，提供完整的功能體驗。
 
 **執行指令範例：**
 
@@ -80,7 +119,9 @@ python pipeline.py \
   --tone "客觀中性"
 ```
 
-### 2. 帶日誌記錄與批次處理 (`pipeline_log.py`)
+### 3. 帶日誌記錄與批次處理 (`pipeline_log.py`)
+
+增強版命令列模式，適合大量處理和自動化場景。
 
 此腳本提供與 `pipeline.py` 相同的流程，並具備以下擴充：
 - 將整個過程的決策摘要記錄到 CSV
@@ -229,3 +270,23 @@ Alpha 操作：
 ```
 
 您可以依照提示輸入數字或縮寫來進行下一步操作。
+
+## 測試
+
+本專案包含完整的測試框架，可確保功能正常運作：
+
+```bash
+# 執行所有測試
+pytest
+
+# 執行特定測試
+pytest tests/smoke_test.py
+```
+
+## 後端服務
+
+如需單獨啟動後端服務：
+
+```bash
+python server.py
+```
