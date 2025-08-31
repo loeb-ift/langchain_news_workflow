@@ -491,89 +491,189 @@ def create_new_stage(new_stage_name):
 
 # 覆盖提示词相关函数
 def check_override_exist(stage_name):
-    """检查是否有覆盖提示词"""
+    """检查是否有覆盖提示词
+    
+    Args:
+        stage_name: 阶段名称 (alpha, beta, gamma, delta)
+        
+    Returns:
+        bool: 如果存在覆盖提示词文件则返回 True，否则返回 False
+    """
+    # 参数验证
+    if not stage_name or stage_name not in ['alpha', 'beta', 'gamma', 'delta']:
+        print(f"警告: 无效的阶段名称 '{stage_name}'，返回 False")
+        return False
+    
     pm = PromptManager()
     try:
         override_path = pm._override_path(stage_name)
-        return os.path.exists(override_path)
+        result = os.path.exists(override_path)
+        if result:
+            print(f"检测到阶段 '{stage_name}' 存在覆盖配置文件: {override_path}")
+        else:
+            print(f"阶段 '{stage_name}' 不存在覆盖配置文件: {override_path}")
+        return result
     except Exception as e:
-        print(f"检查覆盖文件失败: {e}")
+        error_msg = f"检查覆盖文件失败: {e}"
+        print(error_msg)
+        import traceback
+        traceback.print_exc()
         return False
 
 def load_override_content(stage_name):
-    """加载覆盖提示词内容（支持分字段编辑）"""
+    """加载覆盖提示词内容（支持分字段编辑）
+    
+    Args:
+        stage_name: 阶段名称 (alpha, beta, gamma, delta)
+        
+    Returns:
+        tuple: (system, user, news_type_config, target_style_config, tone_config)
+            - system: 系统提示词
+            - user: 用户提示词
+            - news_type_config: 新闻类型配置的JSON字符串
+            - target_style_config: 目标媒体风格配置的JSON字符串
+            - tone_config: 语气配置的JSON字符串
+    """
+    # 参数验证
+    if not stage_name or stage_name not in ['alpha', 'beta', 'gamma', 'delta']:
+        print(f"警告: 无效的阶段名称 '{stage_name}'，返回空配置")
+        return "", "", "{}", "{}", "{}"
+    
     pm = PromptManager()
     try:
         content = pm.load_override(stage_name)
         
-        # 提取基本提示词
-        system = content.get('base', {}).get('system', '')
-        user = content.get('base', {}).get('user', '')
+        if not content:
+            print(f"阶段 '{stage_name}' 没有找到覆盖配置，返回空配置")
+            return "", "", "{}", "{}", "{}"
         
-        # 提取按类型/风格/语气配置的提示词
-        news_type_config = json.dumps(content.get('by_news_type', {}), ensure_ascii=False, indent=2)
-        target_style_config = json.dumps(content.get('by_target_style', {}), ensure_ascii=False, indent=2)
-        tone_config = json.dumps(content.get('by_tone', {}), ensure_ascii=False, indent=2)
+        # 提取基本提示词，确保类型安全
+        system = str(content.get('base', {}).get('system', '')).strip()
+        user = str(content.get('base', {}).get('user', '')).strip()
         
+        # 提取按类型/风格/语气配置的提示词，确保返回有效的JSON字符串
+        def safe_get_json_str(config_dict, key):
+            value = config_dict.get(key, {})
+            if not isinstance(value, dict):
+                value = {}
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        
+        news_type_config = safe_get_json_str(content, 'by_news_type')
+        target_style_config = safe_get_json_str(content, 'by_target_style')
+        tone_config = safe_get_json_str(content, 'by_tone')
+        
+        print(f"成功加载阶段 '{stage_name}' 的覆盖配置")
         return system, user, news_type_config, target_style_config, tone_config
     except Exception as e:
-        print(f"加载覆盖内容失败: {e}")
+        error_msg = f"加载覆盖内容失败: {e}"
+        print(error_msg)
+        import traceback
+        traceback.print_exc()
         # 如果出错，返回空值
         return "", "", "{}", "{}", "{}"
 
 def save_override_content(stage_name, system, user, news_type_config, target_style_config, tone_config):
-    """保存覆盖提示词内容（支持分字段编辑）"""
+    """保存覆盖提示词内容（支持分字段编辑）
+    
+    Args:
+        stage_name: 阶段名称 (alpha, beta, gamma, delta)
+        system: 系统提示词
+        user: 用户提示词
+        news_type_config: 新闻类型配置的JSON字符串
+        target_style_config: 目标媒体风格配置的JSON字符串
+        tone_config: 语气配置的JSON字符串
+        
+    Returns:
+        str: 保存结果消息
+    """
+    # 参数验证
+    if not stage_name or stage_name not in ['alpha', 'beta', 'gamma', 'delta']:
+        return "階段名稱無效，必須是 alpha, beta, gamma 或 delta"
+    
     pm = PromptManager()
     try:
         # 构建完整的数据结构
         data = {
             "base": {
-                "system": system,
-                "user": user
+                "system": system.strip(),
+                "user": user.strip()
             },
             "by_news_type": {},
             "by_target_style": {},
             "by_tone": {}
         }
         
-        # 解析高级配置
+        # 解析高级配置 - 使用 robust_json_loads 提高稳健性
         if news_type_config.strip():
             try:
-                data["by_news_type"] = json.loads(news_type_config)
-            except json.JSONDecodeError:
-                return "新聞類型配置 JSON格式錯誤"
+                data["by_news_type"] = robust_json_loads(news_type_config)
+                # 验证解析结果是否为字典
+                if not isinstance(data["by_news_type"], dict):
+                    return "新聞類型配置必須是JSON對象格式"
+            except ValueError as e:
+                return f"新聞類型配置格式錯誤: {str(e)}"
         
         if target_style_config.strip():
             try:
-                data["by_target_style"] = json.loads(target_style_config)
-            except json.JSONDecodeError:
-                return "目標媒體風格配置 JSON格式錯誤"
+                data["by_target_style"] = robust_json_loads(target_style_config)
+                # 验证解析结果是否为字典
+                if not isinstance(data["by_target_style"], dict):
+                    return "目標媒體風格配置必須是JSON對象格式"
+            except ValueError as e:
+                return f"目標媒體風格配置格式錯誤: {str(e)}"
         
         if tone_config.strip():
             try:
-                data["by_tone"] = json.loads(tone_config)
-            except json.JSONDecodeError:
-                return "語氣配置 JSON格式錯誤"
+                data["by_tone"] = robust_json_loads(tone_config)
+                # 验证解析结果是否为字典
+                if not isinstance(data["by_tone"], dict):
+                    return "語氣配置必須是JSON對象格式"
+            except ValueError as e:
+                return f"語氣配置格式錯誤: {str(e)}"
         
         # 保存覆盖文件
         pm.save_override(stage_name, data)
         
+        print(f"成功保存階段 {stage_name} 的覆蓋提示詞配置")
         return "保存成功"
     except Exception as e:
-        return f"保存失敗: {str(e)}"
+        error_msg = f"保存失敗: {str(e)}"
+        print(error_msg)
+        import traceback
+        traceback.print_exc()
+        return error_msg
 
 def delete_override(stage_name):
-    """删除覆盖提示词"""
+    """删除覆盖提示词
+    
+    Args:
+        stage_name: 阶段名称 (alpha, beta, gamma, delta)
+        
+    Returns:
+        str: 删除结果消息
+    """
+    # 参数验证
+    if not stage_name or stage_name not in ['alpha', 'beta', 'gamma', 'delta']:
+        return "階段名稱無效，必須是 alpha, beta, gamma 或 delta"
+    
     pm = PromptManager()
     try:
+        # 先检查文件是否存在
         override_path = pm._override_path(stage_name)
         if os.path.exists(override_path):
-            os.remove(override_path)
+            # 使用 PromptManager 类的 remove_override 方法删除文件，保持一致性
+            pm.remove_override(stage_name)
+            print(f"成功删除阶段 '{stage_name}' 的覆盖配置")
             return f"自定義配置已成功刪除"
         else:
+            print(f"阶段 '{stage_name}' 的覆盖配置文件不存在: {override_path}")
             return f"自定義配置不存在"
     except Exception as e:
-        return f"刪除失敗: {str(e)}"
+        error_msg = f"刪除失敗: {str(e)}"
+        print(error_msg)
+        import traceback
+        traceback.print_exc()
+        return error_msg
 
 def create_gradio_interface():
     """Create and configure the Gradio interface"""

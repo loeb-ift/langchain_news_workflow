@@ -49,6 +49,7 @@ def test_pe_cancel_no_append_then_accept():
         ],
         input=user_input,
         catch_exceptions=False,
+        prog_name="pipeline",
     )
     assert result.exit_code == 0, result.output
     payload = _parse_cli_json(result.output)
@@ -89,6 +90,7 @@ def test_ej_invalid_json_then_continue():
         ],
         input=user_input,
         catch_exceptions=False,
+        prog_name="pipeline",
     )
     assert result.exit_code == 0, result.output
     payload = _parse_cli_json(result.output)

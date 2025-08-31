@@ -85,6 +85,7 @@ def test_interactive_retry_paths_and_cancel_prompts():
         ],
         input=user_input,
         catch_exceptions=False,
+        prog_name="pipeline",
     )
     assert result.exit_code == 0, result.output
     payload = _parse_cli_json(result.output)
@@ -120,6 +121,7 @@ def test_interactive_each_style_short_path():
             ],
             input=user_input,
             catch_exceptions=False,
+            prog_name="pipeline",
         )
         assert result.exit_code == 0, f"style={style}\n{result.output}"
         payload = _parse_cli_json(result.output)
