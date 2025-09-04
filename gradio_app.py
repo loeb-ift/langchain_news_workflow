@@ -1,1457 +1,889 @@
-#!/usr/bin/env python3
-"""
-Gradio Web Interface for LangChain News Workflow
-Provides a user-friendly web interface for the four-stage news generation pipeline.
-"""
-
 import gradio as gr
 import json
 import os
-import tempfile
-from typing import Dict, Any, List, Optional, Tuple
-from dotenv import load_dotenv
-import pandas as pd
+from typing import Dict, List, Any, Optional
+import logging
+from pathlib import Path
+import re
 from datetime import datetime
-from pipeline_log import write_consolidated_log_to_csv
 
-# Import existing pipeline functionality
-from pipeline import InputConfig, interactive_pipeline, OLLAMA_BASE_URL, MODEL_NAME
-from app_utils.prompt_manager import PromptManager
-from app_utils.ui_texts import get_snippet_templates, get_stage_tips
-from app_utils.json_utils import robust_json_loads
-from app_utils.ollama_utils import get_available_models
+from pipeline import InputConfig, interactive_pipeline
 
-load_dotenv()
+# 設置日誌
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class GradioNewsWorkflow:
-    """Gradio interface workflow manager"""
-    
     def __init__(self):
-        """Initialize the workflow"""
-        self.pm = PromptManager()
-        self.current_session_data = {}
+        """初始化Gradio新聞工作流程"""
+        self.cfg = InputConfig(
+            raw_data="",
+            news_type="財經",
+            target_style="經濟日報",
+            word_limit=800,
+            tone="客觀中性"
+        )
+        self.model_name = "llama3.2"  # 添加默認模型名稱
+        self.llm_client = self._setup_ollama_client()
+        self.prompts = self.load_prompts()  # 添加這行來加載提示詞
+
+    def _setup_ollama_client(self):
+        """設置Ollama客戶端"""
+        try:
+            from ollama import Client
+            return Client(host='http://localhost:11434')
+        except ImportError:
+            print("警告：無法導入ollama，將使用模擬客戶端")
+            return None
+        print("✅ Gradio新聞工作流程初始化完成")
     
-    def _load_prompt_options(self):
-        """从prompts文件夹加载选项配置"""
-        options = {
-            'news_types': [],
-            'target_styles': [],
-            'tones': []
+    def load_prompts(self):
+        """加載所有提示詞模板"""
+        prompts = {}
+        prompts_dir = Path("prompts")
+        
+        # 確保提示詞目錄存在
+        prompts_dir.mkdir(exist_ok=True)
+        
+        # 定義默認提示詞
+        default_prompts = {
+            "alpha": """你是新聞分析專家，請分析以下新聞內容並提取關鍵信息：
+
+新聞內容：{content}
+
+新聞類型：{news_type}
+字數限制：{word_limit}
+語氣風格：{tone}
+目標媒體：{target_style}
+
+請提供：
+1. 主要事件摘要（100字內）
+2. 關鍵人物和組織
+3. 時間和地點
+4. 潛在影響
+5. 背景資訊
+
+請用繁體中文回答，保持專業和客觀。""",
+            
+            "beta": """基於以下Alpha階段分析結果，請進行深度分析：
+
+Alpha分析結果：{alpha_result}
+
+新聞類型：{news_type}
+字數限制：{word_limit}
+語氣風格：{tone}
+目標媒體：{target_style}
+
+請提供：
+1. 事件背後的深層原因
+2. 可能的發展趨勢
+3. 對相關產業的影響
+4. 社會和經濟層面的分析
+5. 專家觀點和預測
+
+請用繁體中文回答，保持深度和洞察力。""",
+            
+            "gamma": """基於Alpha和Beta階段的分析，請創建一篇專業的新聞報導：
+
+Alpha分析：{alpha_result}
+Beta分析：{beta_result}
+
+要求：
+- 新聞類型：{news_type}
+- 字數：{word_limit}字左右
+- 語氣：{tone}
+- 風格：{target_style}
+
+請創建：
+1. 吸引人的標題（20字內）
+2. 引人入勝的導言
+3. 結構清晰的主體內容
+4. 有力的結論
+5. 保持專業性和可讀性
+
+請直接輸出完整的報導文章。""",
+            
+            "delta": """請對以下新聞報導進行最終審核和優化：
+
+報導內容：{gamma_result}
+
+審核標準：
+- 目標媒體：{target_style}
+- 字數要求：{word_limit}字
+- 語氣風格：{tone}
+- 新聞類型：{news_type}
+
+請檢查：
+1. 事實準確性
+2. 語言流暢度
+3. 結構完整性
+4. 標題吸引力
+5. 整體質量
+6. 是否符合發布標準
+
+請提供：
+- 優化後的最終版本
+- 簡要的審核意見
+- 發布建議
+
+使用繁體中文回答。"""
         }
         
-        try:
-            # 加载新闻类型（alpha.json）
-            alpha = self.pm.load_stage('alpha')
-            options['news_types'] = list(alpha['by_news_type'].keys())
+        # 從文件加載提示詞，如果文件不存在則創建
+        for stage, default_prompt in default_prompts.items():
+            prompt_file = prompts_dir / f"{stage}_prompt.txt"
             
-            # 加载目标媒体风格（beta.json）
-            beta = self.pm.load_stage('beta')
-            options['target_styles'] = list(beta['by_target_style'].keys())
-            
-            # 加载语气风格（alpha.json）
-            options['tones'] = list(alpha['by_tone'].keys())
-        except Exception as e:
-            print(f"加载提示词选项失败: {e}")
-            # 提供默认值作为后备
-            options = {
-                'news_types': ['財經', '科技', '產業', '事件', '政策'],
-                'target_styles': ['經濟日報', '中央社', '數位時代', '券商研報'],
-                'tones': ['客觀中性', '積極正面', '謹慎保守']
-            }
-        
-        return options
-    
-    def process_news_article(
-        self,
-        raw_text: str,
-        news_type: str,
-        target_style: str,
-        word_limit: int,
-        tone: str,
-        constraints: str,
-        ollama_host: str,
-        model_name: str,
-        enable_debug: bool,
-        progress=gr.Progress()
-    ) -> Tuple[str, str, str, str, str]:
-        """
-        Process news article through the four-stage pipeline
-        Returns: (final_title, final_content, quality_report, stage_logs, error_message)
-        """
-        try:
-            # 重置当前会话数据
-            self.current_session_data = {
-                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-                'input_params': {
-                    'raw_text': raw_text,
-                    'news_type': news_type,
-                    'target_style': target_style,
-                    'word_limit': word_limit,
-                    'tone': tone,
-                    'constraints': constraints,
-                    'ollama_host': ollama_host,
-                    'model_name': model_name,
-                    'enable_debug': enable_debug
-                },
-                'stages': {},
-                'output': {}
-            }
-            
-            # Validate input
-            if not raw_text.strip():
-                return "", "", "", "", "請輸入原始文章內容"
-            
-            progress(0, desc="準備處理...")
-            
-            # Prepare input config
-            cfg = InputConfig(
-                raw_data=raw_text,
-                news_type=news_type,
-                target_style=target_style,
-                word_limit=word_limit,
-                tone=tone,
-                constraints=constraints
-            )
-            
-            # Call pipeline with Ollama overrides
-            override_base_url = ollama_host if ollama_host else None
-            override_model = model_name if model_name else None
-            
-            progress(0.1, desc="開始處理...")
-            result = interactive_pipeline(
-                cfg, 
-                interactive=True,
-                override_base_url=override_base_url,
-                override_model=override_model,
-                enable_debug=enable_debug
-            )
-            
-            # Handle result
-            if result.get("success"):
-                data = result["data"]
-                
-                # Format logs
-                stage_logs = self._format_stage_logs(data.get("stage_logs", []))
-                
-                # Extract quality report
-                quality_report = json.dumps(data.get("quality_report", {}), ensure_ascii=False, indent=2)
-                
-                # Update session data
-                self.current_session_data['stages'] = data.get("stage_logs", [])
-                self.current_session_data['output'] = {
-                    'title': data.get("best_title", ""),
-                    'content': data.get("final_body", ""),
-                    'quality_report': data.get("quality_report", {})
-                }
-                
-                return (
-                    data.get("best_title", ""),
-                    data.get("final_body", ""),
-                    quality_report,
-                    stage_logs,
-                    ""
-                )
+            if prompt_file.exists():
+                try:
+                    with open(prompt_file, 'r', encoding='utf-8') as f:
+                        prompts[stage] = f.read()
+                except Exception as e:
+                    print(f"警告：無法讀取 {prompt_file}，使用默認提示詞: {e}")
+                    prompts[stage] = default_prompt
             else:
-                error_msg = result.get("message", "處理失敗")
-                return "", "", "", "", error_msg
+                # 創建默認提示詞文件
+                try:
+                    with open(prompt_file, 'w', encoding='utf-8') as f:
+                        f.write(default_prompt)
+                    prompts[stage] = default_prompt
+                    print(f"已創建 {prompt_file} 默認提示詞")
+                except Exception as e:
+                    print(f"警告：無法創建 {prompt_file}，使用內存提示詞: {e}")
+                    prompts[stage] = default_prompt
+        
+        return prompts
+
+    def process_single_article(self, content):
+        """處理單篇文章的完整流程"""
+        try:
+            print(f"開始處理單篇文章，內容長度: {len(content)} 字符")
+            
+            # 初始化各階段結果
+            alpha_result = ""
+            beta_result = ""
+            gamma_result = ""
+            delta_result = ""
+            
+            # 執行Alpha階段 - 資訊架構師
+            print("開始Alpha階段...")
+            alpha_prompt = self.prompts.get("alpha", "").format(
+                content=content,
+                news_type=self.cfg.news_type,
+                word_limit=self.cfg.word_limit,
+                tone=self.cfg.tone,
+                target_style=self.cfg.target_style
+            )
+            
+            alpha_response = self.llm_client.chat(
+                model=self.model_name,
+                messages=[{"role": "user", "content": alpha_prompt}],
+                stream=False
+            )
+            
+            if hasattr(alpha_response, 'message'):
+                alpha_result = alpha_response.message.content
+            elif isinstance(alpha_response, dict) and 'message' in alpha_response:
+                alpha_result = alpha_response['message']['content']
+            else:
+                alpha_result = str(alpha_response)
+            
+            print("Alpha階段完成")
+            
+            # 執行Beta階段 - 風格塑造師
+            print("開始Beta階段...")
+            beta_prompt = self.prompts.get("beta", "").format(
+                alpha_result=alpha_result,
+                news_type=self.cfg.news_type,
+                word_limit=self.cfg.word_limit,
+                tone=self.cfg.tone,
+                target_style=self.cfg.target_style
+            )
+            
+            beta_response = self.llm_client.chat(
+                model=self.model_name,
+                messages=[{"role": "user", "content": beta_prompt}],
+                stream=False
+            )
+            
+            if hasattr(beta_response, 'message'):
+                beta_result = beta_response.message.content
+            elif isinstance(beta_response, dict) and 'message' in beta_response:
+                beta_result = beta_response['message']['content']
+            else:
+                beta_result = str(beta_response)
+            
+            print("Beta階段完成")
+            
+            # 執行Gamma階段 - 標題策略師
+            print("開始Gamma階段...")
+            gamma_prompt = self.prompts.get("gamma", "").format(
+                alpha_result=alpha_result,
+                beta_result=beta_result,
+                news_type=self.cfg.news_type,
+                word_limit=self.cfg.word_limit,
+                tone=self.cfg.tone,
+                target_style=self.cfg.target_style
+            )
+            
+            gamma_response = self.llm_client.chat(
+                model=self.model_name,
+                messages=[{"role": "user", "content": gamma_prompt}],
+                stream=False
+            )
+            
+            if hasattr(gamma_response, 'message'):
+                gamma_result = gamma_response.message.content
+            elif isinstance(gamma_response, dict) and 'message' in gamma_response:
+                gamma_result = gamma_response['message']['content']
+            else:
+                gamma_result = str(gamma_response)
+            
+            print("Gamma階段完成")
+            
+            # 提取標題（從Gamma結果中提取第一行作為標題）
+            lines = gamma_result.strip().split('\n')
+            selected_headline = lines[0] if lines else "無標題"
+            
+            # 執行Delta階段 - 品質守門員
+            print("開始Delta階段...")
+            delta_prompt = self.prompts.get("delta", "").format(
+                gamma_result=gamma_result,
+                news_type=self.cfg.news_type,
+                word_limit=self.cfg.word_limit,
+                tone=self.cfg.tone,
+                target_style=self.cfg.target_style
+            )
+            
+            delta_response = self.llm_client.chat(
+                model=self.model_name,
+                messages=[{"role": "user", "content": delta_prompt}],
+                stream=False
+            )
+            
+            if hasattr(delta_response, 'message'):
+                delta_result = delta_response.message.content
+            elif isinstance(delta_response, dict) and 'message' in delta_response:
+                delta_result = delta_response['message']['content']
+            else:
+                delta_result = str(delta_response)
+            
+            print("Delta階段完成")
+            
+            # 構建完整的結果
+            result = {
+                "status": "success",
+                "selected_headline": selected_headline,
+                "final_content": gamma_result,
+                "alpha_analysis": alpha_result,
+                "beta_analysis": beta_result,
+                "delta_review": delta_result,
+                "stages_info": {
+                    "alpha": {
+                        "title": "Alpha（資訊架構師）",
+                        "purpose": "將原始資料轉為結構化初稿（導言/主體/背景 + 資訊架構）",
+                        "input_data": f"news_type: {self.cfg.news_type}, word_limit: {self.cfg.word_limit}, tone: {self.cfg.tone}",
+                        "expected_output": ["draft_content", "key_points", "info_hierarchy", "completeness_score"],
+                        "success_criteria": ["字數≥200", "具關鍵重點", "完整性≥6"]
+                    },
+                    "beta": {
+                        "title": "Beta（風格塑造師）",
+                        "purpose": "基於Alpha結果進行深度分析和風格優化",
+                        "input_data": "Alpha分析結果",
+                        "expected_output": ["deep_analysis", "trend_prediction", "impact_assessment"],
+                        "success_criteria": ["分析深度≥7", "預測合理性≥6", "影響評估完整"]
+                    },
+                    "gamma": {
+                        "title": "Gamma（標題策略師）",
+                        "purpose": "創建專業新聞報導",
+                        "input_data": "Alpha+Beta分析結果",
+                        "expected_output": ["headline", "final_article", "quality_score"],
+                        "success_criteria": ["標題吸引力≥8", "內容質量≥7", "字數達標"]
+                    },
+                    "delta": {
+                        "title": "Delta（品質守門員）",
+                        "purpose": "最終審核和優化",
+                        "input_data": "完整報導",
+                        "expected_output": ["final_review", "optimization_suggestions", "publish_recommendation"],
+                        "success_criteria": ["準確性≥9", "語言流暢度≥8", "發布就緒度≥7"]
+                    }
+                }
+            }
+            
+            print(f"處理完成，標題: {selected_headline}")
+            return result
             
         except Exception as e:
-            error_msg = f"處理過程中發生錯誤: {str(e)}"
-            print(error_msg)
+            print(f"ERROR:__main__:處理文章時發生錯誤: {str(e)}")
             import traceback
             traceback.print_exc()
-            return "", "", "", "", error_msg
+            return {
+                "error": str(e),
+                "selected_headline": "",
+                "final_content": "",
+                "alpha_analysis": "",
+                "beta_analysis": "",
+                "delta_review": ""
+            }
     
-    def _format_stage_logs(self, logs: List[Dict[str, Any]]) -> str:
-        """Format stage logs for display"""
-        if not logs:
-            return "無階段日誌"
+    def _format_stage_output(self, stage_name: str, stage_info: Dict, result: Dict) -> str:
+        """格式化階段輸出信息"""
+        output = f"=== {stage_info['title']} ===\n"
+        output += f"目的: {stage_info['purpose']}\n"
+        output += f"使用資料: {json.dumps(stage_info['input_data'], ensure_ascii=False, indent=2)}\n"
+        output += f"預期產出: {json.dumps(stage_info['expected_outputs'], ensure_ascii=False)}\n"
+        output += f"成功標準: {json.dumps(stage_info['success_criteria'], ensure_ascii=False)}\n\n"
         
-        formatted_logs = []
-        for log in logs:
-            stage_name = log.get("stage", "未知階段")
-            status = "成功" if log.get("success", False) else "失敗"
-            duration = log.get("duration", "").split('.')[0] if log.get("duration") else "未知"
-            
-            entry = f"📋 {stage_name}: {status} ({duration})"
-            
-            # Add error message if any
-            if not log.get("success") and log.get("error"):
-                entry += f"\n  錯誤: {log.get('error')}"
-            
-            formatted_logs.append(entry)
+        if stage_name == "alpha":
+            output += f"{stage_info['processing_message']}\n"
+            output += f"{stage_info['result']}\n"
+            if "key_points" in stage_info:
+                output += f"{stage_name.capitalize()} 重點: {stage_info['key_points']}"
+        else:
+            output += f"{stage_info['processing_message']}\n"
+            output += f"{stage_info['result']}"
         
-        return "\n\n".join(formatted_logs)
+        return output
     
-    def export_session_data(self) -> str:
-        """Export current session data as JSON and log user preferences"""
-        if not self.current_session_data:
-            return '{"error": "無可用的會話數據"}'
+    def create_interface(self):
+        """創建Gradio界面"""
         
-        try:
-            # 生成会话ID和时间戳
-            session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            timestamp = datetime.now()
+        def process_single_with_progress(content, news_type, target_style, tone, word_limit, special_limit):
+            if not content.strip():
+                return (
+                    "請輸入新聞內容",
+                    "",
+                    "",
+                    "Alpha 階段 AI 處理中，請稍候...",
+                    "Beta 階段 AI 處理中，請稍候...",
+                    "Gamma 階段 AI 處理中，請稍候...",
+                    "Delta 階段 AI 處理中，請稍候..."
+                )
             
-            # 准备日志数据
-            input_params = self.current_session_data.get('input_params', {})
-            stage_logs = self.current_session_data.get('stages', [])
-            output_data = self.current_session_data.get('output', {})
+            try:
+                # 更新配置
+                self.cfg.news_type = news_type
+                self.cfg.target_style = target_style
+                self.cfg.tone = tone
+                self.cfg.word_limit = word_limit
+                
+                print(f"開始處理文章，參數: news_type={news_type}, target_style={target_style}, tone={tone}, word_limit={word_limit}")
+                
+                result = self.process_single_article(content)
+                
+                if isinstance(result, dict) and "error" in result:
+                    error_msg = f"❌ 處理失敗: {result['error']}"
+                    return (
+                        error_msg,
+                        "",
+                        "",
+                        f"{error_msg}\n\n=== Alpha（資訊架構師） ===\n目的: 將原始資料轉為結構化初稿\n狀態: 處理失敗",
+                        f"{error_msg}\n\n=== Beta（風格塑造師） ===\n目的: 優化內容風格和結構\n狀態: 處理失敗",
+                        f"{error_msg}\n\n=== Gamma（標題策略師） ===\n目的: 創建吸引人的標題\n狀態: 處理失敗",
+                        f"{error_msg}\n\n=== Delta（品質守門員） ===\n目的: 最終審核和優化\n狀態: 處理失敗"
+                    )
+                
+                # 獲取各階段的詳細信息
+                stages_info = result.get("stages_info", {})
+                
+                # 構建每個階段的詳細輸出
+                alpha_detail = f"=== Alpha（資訊架構師） ===\n"
+                alpha_detail += f"目的: 將原始資料轉為結構化初稿（導言/主體/背景 + 資訊架構）\n"
+                alpha_detail += f"使用資料: {{'news_type': '{news_type}', 'word_limit': {word_limit}, 'tone': '{tone}'}}\n"
+                alpha_detail += f"預期產出: ['draft_content', 'key_points', 'info_hierarchy', 'completeness_score']\n"
+                alpha_detail += f"成功標準: ['字數≥200', '具關鍵重點', '完整性≥6']\n\n"
+                alpha_detail += result.get("alpha_analysis", "Alpha分析完成")
+                
+                beta_detail = f"=== Beta（風格塑造師） ===\n"
+                beta_detail += f"目的: 基於Alpha結果進行深度分析和風格優化\n"
+                beta_detail += f"使用資料: Alpha分析結果\n"
+                beta_detail += f"預期產出: ['deep_analysis', 'trend_prediction', 'impact_assessment']\n"
+                beta_detail += f"成功標準: ['分析深度≥7', '預測合理性≥6', '影響評估完整']\n\n"
+                beta_detail += result.get("beta_analysis", "Beta分析完成")
+                
+                gamma_detail = f"=== Gamma（標題策略師） ===\n"
+                gamma_detail += f"目的: 創建專業新聞報導\n"
+                gamma_detail += f"使用資料: Alpha+Beta分析結果\n"
+                gamma_detail += f"預期產出: ['headline', 'final_article', 'quality_score']\n"
+                gamma_detail += f"成功標準: ['標題吸引力≥8', '內容質量≥7', '字數達標']\n\n"
+                gamma_detail += result.get("final_content", "Gamma處理完成")
+                
+                delta_detail = f"=== Delta（品質守門員） ===\n"
+                delta_detail += f"目的: 最終審核和優化\n"
+                delta_detail += f"使用資料: 完整報導\n"
+                delta_detail += f"預期產出: ['final_review', 'optimization_suggestions', 'publish_recommendation']\n"
+                delta_detail += f"成功標準: ['準確性≥9', '語言流暢度≥8', '發布就緒度≥7']\n\n"
+                delta_detail += result.get("delta_review", "Delta審核完成")
+                
+                return (
+                    "✅ 處理完成！",
+                    result.get("selected_headline", "無標題"),
+                    result.get("final_content", ""),
+                    alpha_detail,
+                    beta_detail,
+                    gamma_detail,
+                    delta_detail
+                )
+                
+            except Exception as e:
+                error_msg = f"處理文章時發生錯誤: {str(e)}"
+                print(f"ERROR:__main__:{error_msg}")
+                import traceback
+                traceback.print_exc()
+                
+                return (
+                    f"❌ 處理失敗: {error_msg}",
+                    "",
+                    "",
+                    f"=== Alpha（資訊架構師） ===\n目的: 將原始資料轉為結構化初稿\n狀態: 處理錯誤 - {str(e)}",
+                    f"=== Beta（風格塑造師） ===\n目的: 優化內容風格和結構\n狀態: 處理錯誤 - {str(e)}",
+                    f"=== Gamma（標題策略師） ===\n目的: 創建吸引人的標題\n狀態: 處理錯誤 - {str(e)}",
+                    f"=== Delta（品質守門員） ===\n目的: 最終審核和優化\n狀態: 處理錯誤 - {str(e)}"
+                )
+        
+        def process_batch_with_progress(file_obj, news_type, target_style, tone, word_limit, special_limit):
+            if not file_obj:
+                return "請上傳CSV文件"
             
-            # 构建日志条目
-            log_entries = []
+            try:
+                import pandas as pd
+                df = pd.read_csv(file_obj.name)
+                
+                if 'content' not in df.columns:
+                    return "CSV文件必須包含'content'列"
+                
+                # 更新配置
+                self.cfg.news_type = news_type
+                self.cfg.target_style = target_style
+                self.cfg.tone = tone
+                self.cfg.word_limit = word_limit
+                
+                results = []
+                for idx, row in df.iterrows():
+                    content = row['content']
+                    if pd.notna(content) and content.strip():
+                        result = self.process_single_article(content)
+                        results.append(result)
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                batch_filename = f"batch_results_{timestamp}.json"
+                
+                output_dir = Path("outputs")
+                output_dir.mkdir(exist_ok=True)
+                
+                with open(output_dir / batch_filename, 'w', encoding='utf-8') as f:
+                    json.dump(results, f, ensure_ascii=False, indent=2)
+                
+                return f"✅ 批量處理完成！共處理 {len(results)} 篇文章，結果已保存到: {output_dir / batch_filename}"
+                
+            except Exception as e:
+                return f"❌ 批量處理失敗: {str(e)}"
+        
+        def load_prompt_content(stage):
+            """加載指定階段的提示詞內容"""
+            prompts_dir = Path("prompts")
+            prompt_file = prompts_dir / f"{stage.lower()}_prompt.txt"
             
-            # 添加初始配置信息
-            if input_params:
-                config_details = {k: v for k, v in input_params.items() if k != 'raw_text'}
-                log_entries.append({"stage": "Initial", "action": "config", "details": config_details})
-                log_entries.append({"stage": "Initial", "action": "source", "details": {"source": "WEB_INPUT", "text_len": len(input_params.get('raw_text', ''))}})
-            
-            # 添加阶段日志
-            if stage_logs:
-                log_entries.extend(stage_logs)
-            
-            # 构建最终结果
-            final_result = {
-                "success": True,
-                "data": {
-                    "best_title": output_data.get('title', ''),
-                    "final_body": output_data.get('content', ''),
-                    "quality_report": output_data.get('quality_report', {})
-                }
+            if prompt_file.exists():
+                with open(prompt_file, 'r', encoding='utf-8') as f:
+                    return f.read()
+            else:
+                return f"未找到 {stage} 階段的提示詞文件"
+        
+        def save_prompt_content(stage, content):
+            """保存指定階段的提示詞內容"""
+            try:
+                prompts_dir = Path("prompts")
+                prompts_dir.mkdir(exist_ok=True)
+                
+                prompt_file = prompts_dir / f"{stage.lower()}_prompt.txt"
+                with open(prompt_file, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                
+                # 重新加載提示詞
+                self.load_prompts()
+                return f"✅ {stage} 階段提示詞已更新並保存"
+            except Exception as e:
+                return f"❌ 保存失敗: {str(e)}"
+        
+        def reset_prompt_to_default(stage):
+            """重置為默認提示詞"""
+            defaults = {
+                "Alpha": """你是新聞分析專家，請分析以下新聞內容並提取關鍵信息：
+
+新聞內容：{content}
+
+請提供：
+1. 主要事件摘要
+2. 關鍵人物和組織
+3. 時間和地點
+4. 潛在影響
+
+請用繁體中文回答，保持專業和客觀。""",
+                
+                "Beta": """基於以下Alpha階段分析結果，請進行深度分析：
+
+Alpha分析：{alpha_result}
+
+請提供：
+1. 事件背後的深層原因
+2. 可能的發展趨勢
+3. 對相關產業的影響
+4. 社會和經濟層面的分析
+
+請用繁體中文回答，保持深度和洞察力。""",
+                
+                "Gamma": """基於Alpha和Beta階段的分析，請創建一篇專業的新聞報導：
+
+Alpha分析：{alpha_result}
+Beta分析：{beta_result}
+
+要求：
+1. 標題要吸引人且準確
+2. 內容要有深度和廣度
+3. 結構清晰，包含引言、主體、結論
+4. 字數在{word_limit}字左右
+5. 使用繁體中文
+6. 保持{tone}的語調
+7. 符合{target_style}的風格
+
+請直接輸出完整的報導文章。""",
+                
+                "Delta": """請對以下新聞報導進行最終審核和優化：
+
+報導內容：{gamma_result}
+
+審核標準：
+1. 事實準確性
+2. 語言流暢度
+3. 結構完整性
+4. 標題吸引力
+5. 整體質量
+6. 是否符合{target_style}風格
+7. 是否達到{word_limit}字要求
+
+請提供：
+- 優化後的最終版本
+- 簡要的審核意見
+- 是否適合發布的建議
+
+使用繁體中文回答。"""
             }
             
-            # 调用日志记录函数
-            write_consolidated_log_to_csv(
-                session_id=session_id,
-                start_time=timestamp,
-                end_time=timestamp,
-                initial_input=input_params.get('raw_text', ''),
-                log_entries=log_entries,
-                final_result=final_result,
-                log_file="pipeline_log.csv",
-                json_out_dir="logs/details"
-            )
+            return defaults.get(stage, f"未找到 {stage} 的默認提示詞")
+        
+        # 創建界面
+        with gr.Blocks(title="新聞智能分析系統", theme=gr.themes.Soft()) as app:
+            gr.Markdown("# 📰 新聞智能分析系統")
+            gr.Markdown("使用AI技術自動分析、創作和優化新聞內容")
             
-            # 返回JSON格式的会话数据
-            return json.dumps(self.current_session_data, ensure_ascii=False, indent=2)
-        except Exception as e:
-            return f'{{"error": "數據導出失敗: {str(e)}"}}'
-    
-    def process_batch_files(
-        self,
-        files: List[gr.File],
-        news_type: str,
-        target_style: str,
-        word_limit: int
-    ) -> Tuple[str, str]:
-        """
-        Process multiple news articles in batch
-        """
-        try:
-            if not files:
-                return "", "請上傳文件"
-            
-            results = []
-            
-            for file in files:
-                try:
-                    # Read file content
-                    with open(file.name, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    # Process each file
-                    cfg = InputConfig(
-                        raw_data=content,
-                        news_type=news_type,
-                        target_style=target_style,
-                        word_limit=word_limit,
-                        tone="客觀中性"
-                    )
-                    
-                    result = interactive_pipeline(cfg, interactive=False)
-                    
-                    if result.get("success"):
-                        data = result["data"]
-                        results.append({
-                            "filename": os.path.basename(file.name),
-                            "status": "success",
-                            "title": data.get("best_title", ""),
-                            "content": data.get("final_body", ""),
-                            "word_count": len(data.get("final_body", "")),
-                            "publishable": data.get("publishable", False)
-                        })
-                    else:
-                        results.append({
-                            "filename": os.path.basename(file.name),
-                            "status": "error",
-                            "error": result.get("message", "處理失敗"),
-                            "title": "",
-                            "content": ""
-                        })
-                    
-                except Exception as e:
-                    results.append({
-                        "filename": os.path.basename(file.name),
-                        "status": "error",
-                        "error": f"文件處理錯誤: {str(e)}",
-                        "title": "",
-                        "content": ""
-                    })
-            
-            # Convert to CSV
-            df = pd.DataFrame(results)
-            csv_output = df.to_csv(index=False, encoding='utf-8')
-            
-            return csv_output, ""
-            
-        except Exception as e:
-            return "", f"批次處理錯誤: {str(e)}"
-
-# 刷新模型列表函数
-def refresh_model_list(host, status_indicator):
-    """刷新Ollama服务上的可用模型列表"""
-    if not host:  # 如果用户没有输入地址，使用默认地址
-        host = OLLAMA_BASE_URL
-    
-    try:
-        # 显示加载状态
-        status_indicator = gr.update(visible=True, value="正在連接Ollama服務...")
-        
-        # 调用ollama_utils中的函数获取模型列表
-        models = get_available_models(host)
-        
-        # 提取模型名称列表
-        model_names = [model["name"] for model in models]
-        
-        # 更新状态指示器
-        status_indicator = gr.update(visible=True, value=f"成功連接到 {host}，找到 {len(model_names)} 個模型")
-        
-        # 返回更新后的下拉菜单
-        return (
-            gr.Dropdown(
-                choices=model_names,
-                value=model_names[0] if model_names else "",
-                label="模型名稱"
-            ),
-            status_indicator
-        )
-    except Exception as e:
-        error_msg = f"獲取模型列表失敗: {str(e)}"
-        print(error_msg)
-        # 更新状态指示器显示错误
-        status_indicator = gr.update(visible=True, value=error_msg)
-        # 返回空下拉菜单
-        return (
-            gr.Dropdown(choices=[], value="", label="模型名稱 (連接失敗)"),
-            status_indicator
-        )
-
-# 重置状态指示器函数
-def reset_status_indicator():
-    return gr.update(visible=False, value="")
-
-# 重置模型下拉菜单函数
-def reset_model_dropdown():
-    return gr.Dropdown(choices=[], value="", label="模型名稱")
-
-# 提示词管理相关函数
-def get_available_stages():
-    """获取所有可用的提示词阶段"""
-    pm = PromptManager()
-    stages = []
-    try:
-        for file in os.listdir(pm.prompt_dir):
-            if file.endswith(".json") and not file.startswith('__'):
-                stage_name = file[:-5]  # 移除.json后缀
-                stages.append(stage_name)
-        return stages
-    except Exception as e:
-        print(f"获取可用阶段失败: {e}")
-        return []
-
-def load_stage_content(stage_name):
-    """加载指定阶段的提示词内容（支持分字段编辑）"""
-    pm = PromptManager()
-    try:
-        # 加载完整的阶段内容
-        content = pm.load_stage(stage_name)
-        
-        # 提取基本提示词
-        system = content.get('base', {}).get('system', '')
-        user = content.get('base', {}).get('user', '')
-        
-        # 提取按类型/风格/语气配置的提示词
-        news_type_config = json.dumps(content.get('by_news_type', {}), ensure_ascii=False, indent=2)
-        target_style_config = json.dumps(content.get('by_target_style', {}), ensure_ascii=False, indent=2)
-        tone_config = json.dumps(content.get('by_tone', {}), ensure_ascii=False, indent=2)
-        
-        return system, user, news_type_config, target_style_config, tone_config
-    except Exception as e:
-        print(f"加载阶段内容失败: {e}")
-        # 如果出错，返回空值
-        return "", "", "{}", "{}", "{}"
-
-def save_stage_content(stage_name, system, user, news_type_config, target_style_config, tone_config):
-    """保存提示词内容（支持分字段编辑）"""
-    pm = PromptManager()
-    try:
-        # 构建完整的数据结构
-        data = {
-            "base": {
-                "system": system,
-                "user": user
-            },
-            "by_news_type": {},
-            "by_target_style": {},
-            "by_tone": {}
-        }
-        
-        # 解析高级配置
-        if news_type_config.strip():
-            try:
-                data["by_news_type"] = json.loads(news_type_config)
-            except json.JSONDecodeError:
-                return "新聞類型配置 JSON格式錯誤"
-        
-        if target_style_config.strip():
-            try:
-                data["by_target_style"] = json.loads(target_style_config)
-            except json.JSONDecodeError:
-                return "目標媒體風格配置 JSON格式錯誤"
-        
-        if tone_config.strip():
-            try:
-                data["by_tone"] = json.loads(tone_config)
-            except json.JSONDecodeError:
-                return "語氣配置 JSON格式錯誤"
-        
-        # 保存到文件
-        file_path = os.path.join(pm.prompt_dir, f"{stage_name}.json")
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
-        return "保存成功"
-    except Exception as e:
-        return f"保存失敗: {str(e)}"
-
-def delete_stage(stage_name, confirm_text):
-    """删除指定的提示词阶段（需要确认）"""
-    pm = PromptManager()
-    try:
-        # 验证确认文本
-        if confirm_text != "DELETE":
-            return "請輸入 DELETE 以確認刪除"
-            
-        # 检查是否是系统关键阶段
-        critical_stages = ['alpha', 'beta', 'gamma', 'delta']
-        if stage_name in critical_stages:
-            return "警告: 系統關鍵階段不能刪除"
-        
-        file_path = os.path.join(pm.prompt_dir, f"{stage_name}.json")
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            return f"階段 {stage_name} 已成功刪除"
-        else:
-            return f"階段 {stage_name} 不存在"
-    except Exception as e:
-        return f"刪除失敗: {str(e)}"
-
-def create_new_stage(new_stage_name):
-    """创建新的提示词阶段"""
-    pm = PromptManager()
-    try:
-        # 验证阶段名
-        if not new_stage_name or not new_stage_name.strip():
-            return "階段名稱不能為空"
-        
-        # 检查是否已存在
-        file_path = os.path.join(pm.prompt_dir, f"{new_stage_name}.json")
-        if os.path.exists(file_path):
-            return f"階段 {new_stage_name} 已存在"
-        
-        # 创建默认结构
-        default_structure = {
-            "base": {
-                "system": "",
-                "user": ""
-            },
-            "by_news_type": {},
-            "by_target_style": {},
-            "by_tone": {}
-        }
-        
-        # 保存到文件
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(default_structure, f, ensure_ascii=False, indent=2)
-        
-        return f"階段 {new_stage_name} 已成功創建"
-    except Exception as e:
-        return f"創建失敗: {str(e)}"
-
-# 覆盖提示词相关函数
-def check_override_exist(stage_name):
-    """检查是否有覆盖提示词
-    
-    Args:
-        stage_name: 阶段名称 (alpha, beta, gamma, delta)
-        
-    Returns:
-        bool: 如果存在覆盖提示词文件则返回 True，否则返回 False
-    """
-    # 参数验证
-    if not stage_name or stage_name not in ['alpha', 'beta', 'gamma', 'delta']:
-        print(f"警告: 无效的阶段名称 '{stage_name}'，返回 False")
-        return False
-    
-    pm = PromptManager()
-    try:
-        override_path = pm._override_path(stage_name)
-        result = os.path.exists(override_path)
-        if result:
-            print(f"检测到阶段 '{stage_name}' 存在覆盖配置文件: {override_path}")
-        else:
-            print(f"阶段 '{stage_name}' 不存在覆盖配置文件: {override_path}")
-        return result
-    except Exception as e:
-        error_msg = f"检查覆盖文件失败: {e}"
-        print(error_msg)
-        import traceback
-        traceback.print_exc()
-        return False
-
-def load_override_content(stage_name):
-    """加载覆盖提示词内容（支持分字段编辑）
-    
-    Args:
-        stage_name: 阶段名称 (alpha, beta, gamma, delta)
-        
-    Returns:
-        tuple: (system, user, news_type_config, target_style_config, tone_config)
-            - system: 系统提示词
-            - user: 用户提示词
-            - news_type_config: 新闻类型配置的JSON字符串
-            - target_style_config: 目标媒体风格配置的JSON字符串
-            - tone_config: 语气配置的JSON字符串
-    """
-    # 参数验证
-    if not stage_name or stage_name not in ['alpha', 'beta', 'gamma', 'delta']:
-        print(f"警告: 无效的阶段名称 '{stage_name}'，返回空配置")
-        return "", "", "{}", "{}", "{}"
-    
-    pm = PromptManager()
-    try:
-        content = pm.load_override(stage_name)
-        
-        if not content:
-            print(f"阶段 '{stage_name}' 没有找到覆盖配置，返回空配置")
-            return "", "", "{}", "{}", "{}"
-        
-        # 提取基本提示词，确保类型安全
-        system = str(content.get('base', {}).get('system', '')).strip()
-        user = str(content.get('base', {}).get('user', '')).strip()
-        
-        # 提取按类型/风格/语气配置的提示词，确保返回有效的JSON字符串
-        def safe_get_json_str(config_dict, key):
-            value = config_dict.get(key, {})
-            if not isinstance(value, dict):
-                value = {}
-            return json.dumps(value, ensure_ascii=False, indent=2)
-        
-        news_type_config = safe_get_json_str(content, 'by_news_type')
-        target_style_config = safe_get_json_str(content, 'by_target_style')
-        tone_config = safe_get_json_str(content, 'by_tone')
-        
-        print(f"成功加载阶段 '{stage_name}' 的覆盖配置")
-        return system, user, news_type_config, target_style_config, tone_config
-    except Exception as e:
-        error_msg = f"加载覆盖内容失败: {e}"
-        print(error_msg)
-        import traceback
-        traceback.print_exc()
-        # 如果出错，返回空值
-        return "", "", "{}", "{}", "{}"
-
-def save_override_content(stage_name, system, user, news_type_config, target_style_config, tone_config):
-    """保存覆盖提示词内容（支持分字段编辑）
-    
-    Args:
-        stage_name: 阶段名称 (alpha, beta, gamma, delta)
-        system: 系统提示词
-        user: 用户提示词
-        news_type_config: 新闻类型配置的JSON字符串
-        target_style_config: 目标媒体风格配置的JSON字符串
-        tone_config: 语气配置的JSON字符串
-        
-    Returns:
-        str: 保存结果消息
-    """
-    # 参数验证
-    if not stage_name or stage_name not in ['alpha', 'beta', 'gamma', 'delta']:
-        return "階段名稱無效，必須是 alpha, beta, gamma 或 delta"
-    
-    pm = PromptManager()
-    try:
-        # 构建完整的数据结构
-        data = {
-            "base": {
-                "system": system.strip(),
-                "user": user.strip()
-            },
-            "by_news_type": {},
-            "by_target_style": {},
-            "by_tone": {}
-        }
-        
-        # 解析高级配置 - 使用 robust_json_loads 提高稳健性
-        if news_type_config.strip():
-            try:
-                data["by_news_type"] = robust_json_loads(news_type_config)
-                # 验证解析结果是否为字典
-                if not isinstance(data["by_news_type"], dict):
-                    return "新聞類型配置必須是JSON對象格式"
-            except ValueError as e:
-                return f"新聞類型配置格式錯誤: {str(e)}"
-        
-        if target_style_config.strip():
-            try:
-                data["by_target_style"] = robust_json_loads(target_style_config)
-                # 验证解析结果是否为字典
-                if not isinstance(data["by_target_style"], dict):
-                    return "目標媒體風格配置必須是JSON對象格式"
-            except ValueError as e:
-                return f"目標媒體風格配置格式錯誤: {str(e)}"
-        
-        if tone_config.strip():
-            try:
-                data["by_tone"] = robust_json_loads(tone_config)
-                # 验证解析结果是否为字典
-                if not isinstance(data["by_tone"], dict):
-                    return "語氣配置必須是JSON對象格式"
-            except ValueError as e:
-                return f"語氣配置格式錯誤: {str(e)}"
-        
-        # 保存覆盖文件
-        pm.save_override(stage_name, data)
-        
-        print(f"成功保存階段 {stage_name} 的覆蓋提示詞配置")
-        return "保存成功"
-    except Exception as e:
-        error_msg = f"保存失敗: {str(e)}"
-        print(error_msg)
-        import traceback
-        traceback.print_exc()
-        return error_msg
-
-def delete_override(stage_name):
-    """删除覆盖提示词
-    
-    Args:
-        stage_name: 阶段名称 (alpha, beta, gamma, delta)
-        
-    Returns:
-        str: 删除结果消息
-    """
-    # 参数验证
-    if not stage_name or stage_name not in ['alpha', 'beta', 'gamma', 'delta']:
-        return "階段名稱無效，必須是 alpha, beta, gamma 或 delta"
-    
-    pm = PromptManager()
-    try:
-        # 先检查文件是否存在
-        override_path = pm._override_path(stage_name)
-        if os.path.exists(override_path):
-            # 使用 PromptManager 类的 remove_override 方法删除文件，保持一致性
-            pm.remove_override(stage_name)
-            print(f"成功删除阶段 '{stage_name}' 的覆盖配置")
-            return f"自定義配置已成功刪除"
-        else:
-            print(f"阶段 '{stage_name}' 的覆盖配置文件不存在: {override_path}")
-            return f"自定義配置不存在"
-    except Exception as e:
-        error_msg = f"刪除失敗: {str(e)}"
-        print(error_msg)
-        import traceback
-        traceback.print_exc()
-        return error_msg
-
-def create_gradio_interface():
-    """Create and configure the Gradio interface"""
-    workflow = GradioNewsWorkflow()
-    
-    with gr.Blocks(
-        title="LangChain 新聞工作流程",
-        theme=gr.themes.Soft(),
-        css="""
-        .main-container { max-width: 1200px; margin: auto; }
-        .stage-info { background: #f0f8ff; padding: 10px; border-radius: 5px; margin: 10px 0; }
-        .prompt-editor { height: 400px; }
-        .prompt-section { margin-bottom: 20px; }
-        """
-    ) as interface:
-        
-        gr.Markdown("""
-        # 🚀 LangChain 新聞工作流程
-        
-        歡迎使用 AI 驅動的新聞稿生成系統！本系統透過四個階段（Alpha、Beta、Gamma、Delta）
-        將原始資料轉換為專業的新聞稿。
-        
-        ## 🔄 處理流程
-        - **Alpha 階段**: 結構化草稿生成
-        - **Beta 階段**: 風格適配
-        - **Gamma 階段**: 標題生成
-        - **Delta 階段**: 最終審核與定稿
-        """)
-        
-        with gr.Tabs() as tabs:
-            # Single article processing tab
-            with gr.Tab("📝 單篇文章處理") as single_tab:
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        gr.Markdown("### 📋 輸入配置")
-                        
-                        raw_text = gr.Textbox(
-                            label="原始文章內容",
-                            placeholder="請貼上原始新聞資料...",
-                            lines=8,
-                            max_lines=15
-                        )
-                        
-                        with gr.Row():
-                            # 在create_gradio_interface函数中，创建UI组件前获取选项
-                            options = workflow._load_prompt_options()
-                        
-                        news_type = gr.Dropdown(
-                            label="新聞類型",
-                            choices=options['news_types'],
-                            value="財經" if "財經" in options['news_types'] else options['news_types'][0]
-                        )
-                        
-                        target_style = gr.Dropdown(
-                            label="目標媒體風格",
-                            choices=options['target_styles'],
-                            value="經濟日報" if "經濟日報" in options['target_styles'] else options['target_styles'][0]
-                        )
-                        
-                        tone = gr.Dropdown(
-                            label="語氣風格",
-                            choices=options['tones'],
-                            value="客觀中性" if "客觀中性" in options['tones'] else options['tones'][0]
-                        )
-                        
-                        word_limit = gr.Slider(
-                            label="目標字數",
-                            minimum=200,
-                            maximum=2000,
-                            step=50,
-                            value=800
-                        )
-                        
-                        constraints = gr.Textbox(
-                            label="特殊限制 (選填)",
-                            placeholder="例如：避免使用特定詞彙、強調某些觀點等...",
-                            lines=2
-                        )
-                        
-                        with gr.Accordion("🔧 進階設定", open=False):
-                            ollama_host = gr.Textbox(
-                                label="Ollama 服務位址",
-                                placeholder=f"預設: {OLLAMA_BASE_URL}",
-                                value=""
+            with gr.Tabs():
+                # 單篇文章處理
+                with gr.TabItem("單篇文章處理"):
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            # 配置區域
+                            gr.Markdown("### ⚙️ 處理配置")
+                            
+                            news_type_dropdown = gr.Dropdown(
+                                choices=["財經", "科技", "產業", "事件", "政策"],
+                                value=self.cfg.news_type,
+                                label="新聞類型"
                             )
                             
-                            # 添加刷新按钮和模型下拉选择框
-                            with gr.Row():
-                                model_refresh_btn = gr.Button("🔄 刷新模型列表", size="sm")
-                            
-                            # Ollama模型选择器和刷新按钮
-                            model_name = gr.Dropdown(
-                                label="选择Ollama模型",
-                                choices=["llama3:8b", "gemma:7b", "mistral:7b", "phi3:3.8b"],
-                                value="llama3:8b",
-                                interactive=True,
-                                show_label=True,
-                                allow_custom_value=True
+                            target_style_dropdown = gr.Dropdown(
+                                choices=["經濟日報", "中央社", "數位時代", "券商研報"],
+                                value=self.cfg.target_style,
+                                label="目標媒體風格"
                             )
                             
-                            # 添加状态指示器
-                            status_indicator = gr.Textbox(
-                                label="Ollama 連接狀態",
-                                value="",
+                            tone_dropdown = gr.Dropdown(
+                                choices=["客觀中性", "積極正面", "謹慎保守"],
+                                value=self.cfg.tone,
+                                label="語氣風格"
+                            )
+                            
+                            word_limit_slider = gr.Slider(
+                                minimum=200,
+                                maximum=2000,
+                                value=self.cfg.word_limit,
+                                step=50,
+                                label="目標字數"
+                            )
+                            
+                            special_limit_text = gr.Textbox(
+                                label="特殊限制 (可選填)",
+                                placeholder="例如：避免使用專業術語、加入背景說明等...",
+                                lines=2
+                            )
+                            
+                            input_text = gr.Textbox(
+                                label="新聞內容",
+                                placeholder="請輸入需要分析的新聞內容...",
+                                lines=10,
+                                max_lines=20
+                            )
+                            process_btn = gr.Button("🚀 開始分析", variant="primary")
+                        
+                        with gr.Column(scale=3):
+                            status_text = gr.Textbox(label="處理狀態", interactive=False)
+                            title_output = gr.Textbox(label="文章標題", interactive=False)
+                            content_output = gr.Textbox(label="最終報導", lines=15, interactive=False)
+                    
+                    with gr.Row():
+                        with gr.Column():
+                            alpha_output = gr.Textbox(
+                                label="Alpha 分析階段 - 資訊架構師",
+                                lines=12,
                                 interactive=False,
-                                visible=False
+                                value="等待分析..."
                             )
-                            
-                            enable_debug = gr.Checkbox(
-                                label="啟用除錯模式 (顯示提示詞)",
-                                value=False
+                        with gr.Column():
+                            beta_output = gr.Textbox(
+                                label="Beta 分析階段 - 風格塑造師",
+                                lines=12,
+                                interactive=False,
+                                value="等待分析..."
                             )
-                        
-                        process_btn = gr.Button("🚀 開始處理", variant="primary", size="lg")
                     
-                    with gr.Column(scale=3):
-                        gr.Markdown("### 📊 處理結果")
-                        
-                        with gr.Group():
-                            final_title = gr.Textbox(
-                                label="📰 最終標題",
-                                lines=2,
-                                interactive=True
+                    with gr.Row():
+                        with gr.Column():
+                            gamma_output = gr.Textbox(
+                                label="Gamma 分析階段 - 標題策略師",
+                                lines=12,
+                                interactive=False,
+                                value="等待分析..."
+                            )
+                        with gr.Column():
+                            delta_output = gr.Textbox(
+                                label="Delta 分析階段 - 品質守門員",
+                                lines=12,
+                                interactive=False,
+                                value="等待分析..."
+                            )
+                
+                # 批量處理
+                with gr.TabItem("批量處理"):
+                    gr.Markdown("### 📊 批量處理新聞文章")
+                    gr.Markdown("上傳包含新聞內容的CSV文件（需包含'content'列）")
+                    
+                    with gr.Row():
+                        with gr.Column():
+                            gr.Markdown("#### 批量處理配置")
+                            batch_news_type = gr.Dropdown(
+                                choices=["財經", "科技", "產業", "事件", "政策"],
+                                value=self.cfg.news_type,
+                                label="新聞類型"
                             )
                             
-                            final_content = gr.Textbox(
-                                label="📄 最終內容",
-                                lines=15,
+                            batch_target_style = gr.Dropdown(
+                                choices=["經濟日報", "中央社", "數位時代", "券商研報"],
+                                value=self.cfg.target_style,
+                                label="目標媒體風格"
+                            )
+                            
+                            batch_tone = gr.Dropdown(
+                                choices=["客觀中性", "積極正面", "謹慎保守"],
+                                value=self.cfg.tone,
+                                label="語氣風格"
+                            )
+                            
+                            batch_word_limit = gr.Slider(
+                                minimum=200,
+                                maximum=2000,
+                                value=self.cfg.word_limit,
+                                step=50,
+                                label="目標字數"
+                            )
+                            
+                            batch_special_limit = gr.Textbox(
+                                label="特殊限制 (可選填)",
+                                placeholder="例如：避免使用專業術語、加入背景說明等...",
+                                lines=2
+                            )
+                        
+                        with gr.Column():
+                            batch_file = gr.File(
+                                label="上傳CSV文件",
+                                file_types=[".csv"],
+                                type="filepath"
+                            )
+                            batch_btn = gr.Button("🔄 開始批量處理", variant="primary")
+                            batch_status = gr.Textbox(label="批量處理狀態", interactive=False)
+                
+                # 提示詞管理工具
+                with gr.TabItem("📝 提示詞管理工具"):
+                    gr.Markdown("## 📝 提示詞管理工具")
+                    gr.Markdown("在此頁面您可以查看、編輯、創建和管理提示詞配置。")
+                    
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            gr.Markdown("### 📋 提示詞階段管理")
+                            
+                            stage_selector = gr.Dropdown(
+                                choices=["Alpha", "Beta", "Gamma", "Delta"],
+                                value="Alpha",
+                                label="選擇提示詞階段"
+                            )
+                            
+                            with gr.Row():
+                                refresh_btn = gr.Button("🔄 刷新")
+                                reset_btn = gr.Button("↩️ 重置為默認")
+                            
+                            save_btn = gr.Button("💾 保存修改", variant="primary")
+                        
+                        with gr.Column(scale=3):
+                            gr.Markdown("### ✏️ 提示詞內容編輯器")
+                            
+                            prompt_editor = gr.Textbox(
+                                label="提示詞內容",
+                                lines=20,
                                 max_lines=25,
                                 interactive=True
                             )
-                        
-                        with gr.Accordion("📈 品質報告", open=False):
-                            quality_report = gr.Textbox(
-                                label="品質分析",
-                                lines=8,
+                            
+                            status_msg = gr.Textbox(
+                                label="操作狀態",
                                 interactive=False
                             )
-                        
-                        with gr.Accordion("📋 處理日誌", open=False):
-                            stage_logs = gr.Textbox(
-                                label="階段日誌",
-                                lines=6,
-                                interactive=False
-                            )
-                        
-                        error_output = gr.Textbox(
-                            label="錯誤訊息",
-                            visible=False,
-                            interactive=False
-                        )
-                        
-                        with gr.Row():
-                            export_btn = gr.Button("💾 匯出會話數據", size="sm")
-                            session_data = gr.Textbox(
-                                label="會話數據 (JSON)",
-                                visible=False,
-                                lines=10
-                            )
-                    
-            # Batch processing tab
-            with gr.Tab("📁 批量处理文件") as batch_tab:
-                gr.Markdown("### 批量处理多份文章\n\n上传多个txt文件，一次性完成多篇文章的智能编辑，适合需要处理大量文档的用户。")
                 
-                with gr.Row():
-                    with gr.Column():
-                        file_upload = gr.Files(
-                            label="上传文本文件 (.txt)",
-                            file_types=[".txt"],
-                            file_count="multiple"
-                        )
-                        
-                        with gr.Row():
-                            # 在create_gradio_interface函数中，创建UI组件前获取选项
-                            batch_options = workflow._load_prompt_options()
-                        
-                        with gr.Row():
-                            batch_news_type = gr.Dropdown(
-                                label="文章类型",
-                                choices=batch_options['news_types'],
-                                value="財經" if "財經" in batch_options['news_types'] else batch_options['news_types'][0]
-                            )
-                            batch_target_style = gr.Dropdown(
-                                label="风格类型",
-                                choices=batch_options['target_styles'],
-                                value="經濟日報" if "經濟日報" in batch_options['target_styles'] else batch_options['target_styles'][0]
-                            )
-                            batch_word_limit = gr.Slider(
-                                label="目标字数",
-                                minimum=200,
-                                maximum=2000,
-                                step=50,
-                                value=800
-                            )
-                        
-                        # 高级设置（可选）
-                        with gr.Accordion("🔧 高级设置", open=False):
-                            batch_ollama_host = gr.Textbox(
-                                label="Ollama 服务地址",
-                                placeholder=f"默认: {OLLAMA_BASE_URL}",
-                                value=""
-                            )
-                            
-                            # 添加刷新按钮和模型下拉选择框
-                            with gr.Row():
-                                batch_model_refresh_btn = gr.Button("🔄 刷新模型列表", size="sm")
-                            
-                            batch_model_name = gr.Dropdown(
-                                label="选择AI模型",
-                                choices=["llama3:8b", "gemma:7b", "mistral:7b", "phi3:3.8b"],
-                                value="llama3:8b",
-                                interactive=True,
-                                show_label=True,
-                                allow_custom_value=True
-                            )
-                            
-                            # 添加状态指示器
-                            batch_status_indicator = gr.Textbox(
-                                label="AI服务连接状态",
-                                value="",
-                                interactive=False,
-                                visible=False
-                            )
-                        
-                        batch_process_btn = gr.Button("🔄 开始批量处理", variant="primary")
+                # 系統信息
+                with gr.TabItem("ℹ️ 系統信息"):
+                    gr.Markdown("### ℹ️ 系統信息")
                     
-                    with gr.Column():
-                        batch_results = gr.Textbox(
-                            label="📊 处理结果 (CSV格式)",
-                            lines=15,
-                            interactive=False
-                        )
-                        
-                        batch_error = gr.Textbox(
-                            label="错误信息",
-                            visible=False,
-                            interactive=False
-                        )
-                        
-            # Prompt management tab
-            with gr.Tab("🛠️ 提示词管理") as prompt_tab:
-                gr.Markdown("""
-                ### 📝 提示词管理工具
-                在此頁面您可以查看、編輯、創建和管理提示词配置。
-                """)
-                
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        # 阶段选择和管理
-                        gr.Markdown("#### 提示词階段管理")
-                        
-                        # 初始获取可用阶段
-                        available_stages = get_available_stages()
-                        
-                        stage_selector = gr.Dropdown(
-                            label="選擇提示词階段",
-                            choices=available_stages,
-                            value="alpha" if "alpha" in available_stages else (available_stages[0] if available_stages else ""),
-                            interactive=True
-                        )
-                        
-                        refresh_stages_btn = gr.Button("🔄 刷新階段列表", size="sm")
-                        
-                        with gr.Row():
-                            save_stage_btn = gr.Button("💾 保存階段", size="sm")
-                            delete_stage_btn = gr.Button("🗑️ 刪除階段", size="sm", variant="stop")
-                            
-                        gr.Markdown("**提示：** 选择阶段后会自动加载内容，修改后请点击保存按钮。")
-                        
-                        # 创建新阶段
-                        with gr.Row() as new_stage_row:
-                            new_stage_name = gr.Textbox(
-                                label="新階段名稱",
-                                placeholder="輸入新階段名稱",
-                                lines=1,
-                                scale=2
-                            )
-                            create_stage_btn = gr.Button("✨ 創建新階段", size="sm", scale=1)
-                        
-                        # 状态消息
-                        prompt_status = gr.Textbox(
-                            label="操作狀態",
-                            value="",
-                            interactive=False,
-                            visible=False
-                        )
-                        
-                        # 自定义配置管理
-                        gr.Markdown("#### 自定義配置管理")
-                        
-                        gr.Markdown("""
-                        **自定義配置**是一種特殊的配置保存方式，它允許您修改和保存特定階段的提示词，而不影響原始配置文件。
-                        - 開啟此選項時，系統將使用您自定義的提示词配置
-                        - 新建立階段時，此選項默認為關閉，使用原始配置
-                        - 自定義配置保存在獨立的文件中，可隨時開啟/關閉或刪除
-                        """)
-                        
-                        override_checkbox = gr.Checkbox(
-                            label="使用自定義配置 (將使用您保存的自定義版本，而非原始配置)",
-                            value=False
-                        )
-                        
-                        with gr.Row():
-                            save_override_btn = gr.Button("💾 另存為自定義配置", size="sm")
-                            delete_override_btn = gr.Button("🗑️ 刪除自定義配置", size="sm", variant="stop")
-                        
-                        override_status = gr.Textbox(
-                            label="自定義配置操作狀態",
-                            value="",
-                            interactive=False,
-                            visible=False
-                        )
-                    
-                    with gr.Column(scale=3):
-                        gr.Markdown("#### 提示词內容編輯器")
-                        
-                        # 基础提示词编辑区域
-                        gr.Markdown("**📋 基礎提示词**")
-                        system_prompt = gr.Textbox(
-                            label="System 提示词",
-                            lines=5,
-                            max_lines=10,
-                            interactive=True
-                        )
-                        user_prompt = gr.Textbox(
-                            label="User 提示词",
-                            lines=8,
-                            max_lines=15,
-                            interactive=True
-                        )
-                        
-                        # 特殊说明
-                        gr.Markdown("""
-                        **提示：** 提示词中可以使用 `{news_type}`, `{target_style}`, `{tone}`, `{word_limit}` 等佔位符，
-                        在實際使用時將被替換為相應的值。
-                        """)
-                        
-                        # 高级配置
-                        with gr.Accordion("🔧 高级配置 (特定类型/风格/语气的追加提示词)", open=True):
-                            gr.Markdown("**提示：** 所有配置通过下方表单进行，系统将自动生成所需的JSON格式，无需手动编辑。")
-                            
-                            # 按新闻类型配置
-                            with gr.Row():
-                                gr.Markdown("**📰 按新闻类型配置**")
-                            
-                            # 获取默认的新闻类型选项
-                            default_news_types = list(DEFAULT_SUMMARIES["news_type"].keys()) if "DEFAULT_SUMMARIES" in globals() else ['財經', '科技', '產業', '事件', '政策']
-                            
-                            # 新闻类型配置的UI组件 - 调整顺序，先显示已配置列表
-                            news_type_list = gr.Dataframe(
-                                label="已配置的新聞類型",
-                                headers=["類型", "提示词"],
-                                datatype=["str", "str"],
-                                interactive=False
-                            )
-                            
-
-                            
-                            with gr.Row():
-                                news_type_selector = gr.Dropdown(
-                                    label="選擇新聞類型",
-                                    choices=default_news_types + ["自定義"],
-                                    value="財經"
-                                )
-                                custom_news_type = gr.Textbox(
-                                    label="自定義新聞類型",
-                                    visible=False,
-                                    placeholder="輸入自定義類型名稱"
-                                )
-                            
-                            news_type_prompt = gr.Textbox(
-                                label="编辑提示词",
-                                lines=2,
-                                placeholder="強調數據與市場影響",
+                    with gr.Row():
+                        with gr.Column():
+                            gr.Markdown("#### 系統配置")
+                            llm_provider_text = gr.Textbox(
+                                value="Ollama本地模型",
+                                label="LLM提供商",
                                 interactive=True
                             )
-                            
-                            save_news_type_btn = gr.Button("💾 保存新聞類型配置")
-                            
-                            # 隐藏的JSON编辑器（用于内部数据交换）
-                            news_type_editor = gr.Textbox(visible=False)
-                            
-                            # 分隔线
-                            gr.Markdown("---")
-                            
-                            # 按目标风格配置
-                            with gr.Row():
-                                gr.Markdown("**🎨 按目标风格配置**")
-                            
-                            # 获取默认的目标风格选项
-                            default_styles = list(DEFAULT_SUMMARIES["target_style"].keys()) if "DEFAULT_SUMMARIES" in globals() else ['經濟日報', '中央社', '數位時代', '券商研報']
-                            
-                            # 目标风格配置的UI组件
-                            style_list = gr.Dataframe(
-                                label="已配置的目標風格",
-                                headers=["風格", "提示词"],
-                                datatype=["str", "str"],
-                                interactive=False
-                            )
-                            
-
-                            
-                            with gr.Row():
-                                style_selector = gr.Dropdown(
-                                    label="選擇目標風格",
-                                    choices=default_styles + ["自定義"],
-                                    value="經濟日報"
-                                )
-                                custom_style = gr.Textbox(
-                                    label="自定義目標風格",
-                                    visible=False,
-                                    placeholder="輸入自定義風格名稱"
-                                )
-                            
-                            style_prompt = gr.Textbox(
-                                label="编辑提示词",
-                                lines=2,
-                                placeholder="倒金字塔結構，正式專業，財經術語適中",
+                            port_text = gr.Textbox(
+                                value="7860",
+                                label="服務端口",
                                 interactive=True
                             )
-                            
-                            save_style_btn = gr.Button("💾 保存目標風格配置")
-                            
-                            # 隐藏的JSON编辑器（用于内部数据交换）
-                            style_editor = gr.Textbox(visible=False)
-                            
-                            # 分隔线
-                            gr.Markdown("---")
-                            
-                            # 按语气配置
-                            with gr.Row():
-                                gr.Markdown("**😊 按语气配置**")
-                            
-                            # 获取默认的语气选项
-                            default_tones = list(DEFAULT_SUMMARIES["tone"].keys()) if "DEFAULT_SUMMARIES" in globals() else ['客觀中性', '積極正面', '謹慎保守']
-                            
-                            # 语气配置的UI组件
-                            tone_list = gr.Dataframe(
-                                label="已配置的語氣",
-                                headers=["語氣", "提示词"],
-                                datatype=["str", "str"],
-                                interactive=False
-                            )
-                            
-
-                            
-                            with gr.Row():
-                                tone_selector = gr.Dropdown(
-                                    label="選擇語氣",
-                                    choices=default_tones + ["自定義"],
-                                    value="客觀中性"
-                                )
-                                custom_tone = gr.Textbox(
-                                    label="自定義語氣",
-                                    visible=False,
-                                    placeholder="輸入自定義語氣名稱"
-                                )
-                            
-                            tone_prompt = gr.Textbox(
-                                label="编辑提示词",
-                                lines=2,
-                                placeholder="保持客觀描述，避免誇張與推測",
+                            model_name_text = gr.Textbox(
+                                value=self.model_name,
+                                label="使用模型",
                                 interactive=True
                             )
-                            
-                            save_tone_btn = gr.Button("💾 保存語氣配置")
-                            
-                            # 隐藏的JSON编辑器（用于内部数据交换）
-                            tone_editor = gr.Textbox(visible=False)
                         
-                        # 提示
-                        gr.Markdown("**提示：** 所有配置將在保存階段時自動儲存。")
-                        
-
-                        
-
-
-        # 初始化函数，用于加载配置到新UI
-        def initialize_advanced_config(stage_name):
-            if not stage_name:
-                return gr.update(value=[]), gr.update(value=[]), gr.update(value=[]), "{}", "{}", "{}"
-
-            # 加载阶段内容
-            _, _, news_type_json, target_style_json, tone_json = load_stage_content(stage_name)
-
-            try:
-                # 解析JSON数据
-                news_type_data = json.loads(news_type_json) if news_type_json.strip() else {}
-                target_style_data = json.loads(target_style_json) if target_style_json.strip() else {}
-                tone_data = json.loads(tone_json) if tone_json.strip() else {}
-
-                # 转换为DataFrame格式
-                news_type_df = [[k, v.get('user_append', '')] for k, v in news_type_data.items()]
-                target_style_df = [[k, v.get('user_append', '')] for k, v in target_style_data.items()]
-                tone_df = [[k, v.get('user_append', '')] for k, v in tone_data.items()]
-
-                return (
-                    gr.update(value=news_type_df),
-                    gr.update(value=target_style_df),
-                    gr.update(value=tone_df),
-                    news_type_json,
-                    target_style_json,
-                    tone_json
-                )
-            except Exception as e:
-                print(f"初始化高级配置失败: {e}")
-                return gr.update(value=[]), gr.update(value=[]), gr.update(value=[]), "{}", "{}", "{}"
-
-        # 更新JSON数据函数
-        def update_json_data(config_type, action, key, value, current_json):
-            try:
-                data = json.loads(current_json) if current_json.strip() else {}
-
-                if action == "add" or action == "update":
-                    data[key] = {"user_append": value}
-
-                return json.dumps(data, ensure_ascii=False, indent=2)
-            except Exception as e:
-                print(f"更新JSON数据失败: {e}")
-                return current_json
-
-        # 添加配置项函数
-        def add_config_item(config_type, selector_value, custom_value, prompt, current_dataframe, current_json):
-            # 确定配置项的键
-            if selector_value == "自定義":
-                if not custom_value or not custom_value.strip():
-                    return current_dataframe, current_json, "自定義名稱不能為空"
-                key = custom_value.strip()
-            else:
-                key = selector_value
-
-            # 检查是否已存在
-            if any(row[0] == key for row in current_dataframe):
-                return current_dataframe, current_json, f"{key} 已存在"
-
-            # 更新JSON数据
-            new_json = update_json_data(config_type, "add", key, prompt, current_json)
-
-            # 更新DataFrame
-            new_dataframe = current_dataframe.copy()
-            new_dataframe.append([key, prompt])
-
-            return new_dataframe, new_json, f"成功添加 {key}"
-
-        # 更新配置项函数
-        def update_config_item(config_type, selector_value, custom_value, prompt, current_dataframe, current_json):
-            # 确定配置项的键
-            if selector_value == "自定義":
-                if not custom_value or not custom_value.strip():
-                    return current_dataframe, current_json, "自定義名稱不能為空"
-                key = custom_value.strip()
-            else:
-                key = selector_value
-
-            # 检查是否存在
-            key_exists = any(row[0] == key for row in current_dataframe)
-            if not key_exists:
-                return current_dataframe, current_json, f"{key} 不存在"
-
-            # 更新JSON数据
-            new_json = update_json_data(config_type, "update", key, prompt, current_json)
-
-            # 更新DataFrame
-            new_dataframe = []
-            for row in current_dataframe:
-                if row[0] == key:
-                    new_dataframe.append([key, prompt])
-                else:
-                    new_dataframe.append(row)
-
-            return new_dataframe, new_json, f"成功更新 {key}"
-
-
-
-        # 自定義选项显示切换
-        def toggle_custom_input(selector_value, custom_input):
-            return gr.update(visible=(selector_value == "自定義"))
-
-        # 加载选择项的提示词
-        def load_prompt_for_selection(selector_value, custom_value, list_df):
-            # 确定配置项的键
-            if selector_value == "自定義":
-                key = custom_value.strip() if custom_value else ""
-            else:
-                key = selector_value
-
-            # 1. 先在DataFrame中查找对应的提示词
-            for row in list_df:
-                if row[0] == key:
-                    return row[1]  # 返回已配置的提示词
-
-            # 2. 如果找不到已配置的提示词，从DEFAULT_SUMMARIES中获取默认提示词
-            try:
-                from app_utils.prompt_manager import DEFAULT_SUMMARIES
-                if key and "DEFAULT_SUMMARIES" in globals() and key in DEFAULT_SUMMARIES.get("news_type", {}):
-                    return DEFAULT_SUMMARIES["news_type"][key]
-            except Exception as e:
-                print(f"加载默认提示词失败: {e}")
-
-            # 如果都找不到，返回空字符串
-            return ""
-
-        # 自定義选项事件绑定和加载提示词
-        news_type_selector.change(
-            fn=toggle_custom_input,
-            inputs=[news_type_selector, custom_news_type],
-            outputs=[custom_news_type]
-        ).then(
-            fn=load_prompt_for_selection,
-            inputs=[news_type_selector, custom_news_type, news_type_list],
-            outputs=[news_type_prompt]
-        )
+                        with gr.Column():
+                            gr.Markdown("#### 使用統計")
+                            system_status_text = gr.Textbox(
+                                value="就緒",
+                                label="系統狀態",
+                                interactive=True
+                            )
+                            processed_count_text = gr.Textbox(
+                                value=str(len(os.listdir("outputs"))) if os.path.exists("outputs") else "0",
+                                label="已處理文章數",
+                                interactive=True
+                            )
+            
+            # 設置事件處理
+            process_btn.click(
+                fn=process_single_with_progress,
+                inputs=[
+                    input_text,
+                    news_type_dropdown,
+                    target_style_dropdown,
+                    tone_dropdown,
+                    word_limit_slider,
+                    special_limit_text
+                ],
+                outputs=[
+                    status_text,
+                    title_output,
+                    content_output,
+                    alpha_output,
+                    beta_output,
+                    gamma_output,
+                    delta_output
+                ]
+            )
+            
+            batch_btn.click(
+                fn=process_batch_with_progress,
+                inputs=[
+                    batch_file,
+                    batch_news_type,
+                    batch_target_style,
+                    batch_tone,
+                    batch_word_limit,
+                    batch_special_limit
+                ],
+                outputs=[batch_status]
+            )
+            
+            # 提示詞管理事件
+            def load_selected_prompt(stage):
+                content = load_prompt_content(stage)
+                return content, f"✅ 已加載 {stage} 階段提示詞"
+            
+            def save_current_prompt(stage, content):
+                result = save_prompt_content(stage, content)
+                new_content = load_prompt_content(stage)
+                return new_content, result
+            
+            def reset_to_default_prompt(stage):
+                default_content = reset_prompt_to_default(stage)
+                return default_content, f"✅ {stage} 階段已重置為默認提示詞"
+            
+            # 提示詞事件綁定
+            stage_selector.change(
+                fn=load_selected_prompt,
+                inputs=[stage_selector],
+                outputs=[prompt_editor, status_msg]
+            )
+            
+            refresh_btn.click(
+                fn=load_selected_prompt,
+                inputs=[stage_selector],
+                outputs=[prompt_editor, status_msg]
+            )
+            
+            save_btn.click(
+                fn=save_current_prompt,
+                inputs=[stage_selector, prompt_editor],
+                outputs=[prompt_editor, status_msg]
+            )
+            
+            reset_btn.click(
+                fn=reset_to_default_prompt,
+                inputs=[stage_selector],
+                outputs=[prompt_editor, status_msg]
+            )
         
-        # 目标风格的自定義选项事件绑定和加载提示词
-        style_selector.change(
-            fn=toggle_custom_input,
-            inputs=[style_selector, custom_style],
-            outputs=[custom_style]
-        ).then(
-            fn=load_prompt_for_selection,
-            inputs=[style_selector, custom_style, style_list],
-            outputs=[style_prompt]
-        )
-        
-        # 语气的自定義选项事件绑定和加载提示词
-        tone_selector.change(
-            fn=toggle_custom_input,
-            inputs=[tone_selector, custom_tone],
-            outputs=[custom_tone]
-        ).then(
-            fn=load_prompt_for_selection,
-            inputs=[tone_selector, custom_tone, tone_list],
-            outputs=[tone_prompt]
-        )
-
-        # 创建包装函数来捕获常量值
-        def wrap_save_config_item(config_type):
-            def wrapper(selector, custom_input, prompt, list_df, editor):
-                # 确定配置项的键
-                if selector == "自定義":
-                    if not custom_input or not custom_input.strip():
-                        return list_df, editor, "自定義名稱不能為空"
-                    key = custom_input.strip()
-                else:
-                    key = selector
-
-                # 更新JSON数据
-                new_json = update_json_data(config_type, "add", key, prompt, editor)
-
-                # 更新DataFrame
-                try:
-                    current_data = json.loads(editor) if editor.strip() else {}
-                except:
-                    current_data = {}
-                
-                # 确保key存在于current_data中
-                if key not in current_data:
-                    current_data[key] = {}
-                current_data[key]['user_append'] = prompt
-                
-                # 转换为DataFrame格式
-                new_dataframe = [[k, v.get('user_append', '')] for k, v in current_data.items()]
-
-                # 返回更新后的DataFrame和JSON
-                return new_dataframe, new_json, f"成功保存 {key}"
-            return wrapper
-
-
-
-        # 新闻类型配置事件
-        save_news_type_btn.click(
-            fn=wrap_save_config_item("news_type"),
-            inputs=[
-                news_type_selector, custom_news_type, news_type_prompt,
-                news_type_list, news_type_editor
-            ],
-            outputs=[news_type_list, news_type_editor, prompt_status]
-        ).then(
-            fn=lambda: gr.update(visible=True),
-            outputs=[prompt_status]
-        ).then(
-            fn=lambda: gr.update(visible=False),
-            outputs=[prompt_status],
-            queue=False
-        )
-        
-        # 目标风格配置事件
-        save_style_btn.click(
-            fn=wrap_save_config_item("target_style"),
-            inputs=[
-                style_selector, custom_style, style_prompt,
-                style_list, style_editor
-            ],
-            outputs=[style_list, style_editor, prompt_status]
-        ).then(
-            fn=lambda: gr.update(visible=True),
-            outputs=[prompt_status]
-        ).then(
-            fn=lambda: gr.update(visible=False),
-            outputs=[prompt_status],
-            queue=False
-        )
-        
-        # 语气配置事件
-        save_tone_btn.click(
-            fn=wrap_save_config_item("tone"),
-            inputs=[
-                tone_selector, custom_tone, tone_prompt,
-                tone_list, tone_editor
-            ],
-            outputs=[tone_list, tone_editor, prompt_status]
-        ).then(
-            fn=lambda: gr.update(visible=True),
-            outputs=[prompt_status]
-        ).then(
-            fn=lambda: gr.update(visible=False),
-            outputs=[prompt_status],
-            queue=False
-        )
-        
-
-
-        # 阶段选择器变更时自动加载内容
-        stage_selector.change(
-            fn=lambda stage: load_stage_content(stage) if stage else ("", "", "{}", "{}", ""),
-            inputs=[stage_selector],
-            outputs=[system_prompt, user_prompt, news_type_editor, style_editor, tone_editor]
-        ).then(
-            fn=lambda stage: initialize_advanced_config(stage),
-            inputs=[stage_selector],
-            outputs=[news_type_list, style_list, tone_list, news_type_editor, style_editor, tone_editor]
-        ).then(
-            fn=lambda stage: check_override_exist(stage) if stage else False,
-            inputs=[stage_selector],
-            outputs=[override_checkbox]
-        )
-
-        # 界面加载时自动加载默认阶段内容
-        def load_initial_content():
-            available_stages = get_available_stages()
-            default_stage = "alpha" if "alpha" in available_stages else (available_stages[0] if available_stages else "")
-            if default_stage:
-                content = load_override_content(default_stage) if check_override_exist(default_stage) else load_stage_content(default_stage)
-                # 返回需要的所有值
-                return content[0], content[1], content[2], content[3], content[4]
-            return "", "", "{}", "{}", "{}"
-
-        # 在界面加载时触发
-        interface.load(
-            fn=load_initial_content,
-            outputs=[system_prompt, user_prompt, news_type_editor, style_editor, tone_editor]
-        ).then(
-            fn=lambda: "alpha" if "alpha" in get_available_stages() else (get_available_stages()[0] if get_available_stages() else ""),
-            outputs=[stage_selector]
-        ).then(
-            fn=lambda stage: initialize_advanced_config(stage),
-            inputs=[stage_selector],
-            outputs=[news_type_list, style_list, tone_list, news_type_editor, style_editor, tone_editor]
-        ).then(
-            fn=lambda stage: check_override_exist(stage) if stage else False,
-            inputs=[stage_selector],
-            outputs=[override_checkbox]
-        )
-
-        return interface
+        return app
 
 def main():
-    """Main function to launch the Gradio interface"""
-    interface = create_gradio_interface()
-    
-    # Launch the interface
-    interface.launch(
-        server_name="127.0.0.1",
-        server_port=7860,
-        share=False,
-        show_api=False,
-        inbrowser=True
-    )
+    """主函數"""
+    try:
+        print("🚀 啟動新聞智能分析系統...")
+        
+        # 創建應用實例
+        app_instance = GradioNewsWorkflow()
+        
+        # 創建界面
+        app = app_instance.create_interface()
+        
+        # 啟動應用
+        app.launch(
+            server_name="0.0.0.0",
+            server_port=7860,
+            share=False,
+            debug=True,
+            show_error=True
+        )
+        
+    except Exception as e:
+        print(f"❌ 啟動失敗: {e}")
+        print("請確保：")
+        print("1. Ollama 服務正在運行 (http://localhost:11434)")
+        print("2. 已安裝所需的 Python 套件")
+        print("3. 端口 7860 未被佔用")
 
 if __name__ == "__main__":
     main()
