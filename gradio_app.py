@@ -89,8 +89,17 @@ class GradioNewsWorkflow:
             temp_client = Client(host=host_url.rstrip('/'))
             
             # 獲取模型列表
-            models = temp_client.list()
-            model_names = [model['name'] for model in models.get('models', [])]
+            response = temp_client.list()
+            
+            # 根據Ollama API實際響應格式獲取模型名稱
+            if isinstance(response, dict) and 'models' in response:
+                model_names = [model['name'] for model in response['models']]
+            elif isinstance(response, list):
+                # 某些版本的Ollama直接返回列表
+                model_names = [model['name'] for model in response]
+            else:
+                # 處理其他可能的響應格式
+                model_names = [model['name'] for model in response.models]
             
             if model_names:
                 return model_names, f"✅ 成功獲取 {len(model_names)} 個模型"
