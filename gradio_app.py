@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 class GradioNewsWorkflow:
     def __init__(self):
         """初始化Gradio新聞工作流程"""
+        # 加載環境變量
+        from dotenv import load_dotenv
+        load_dotenv()
+        
         self.cfg = InputConfig(
             raw_data="",
             news_type="財經",
@@ -23,7 +27,8 @@ class GradioNewsWorkflow:
             word_limit=800,
             tone="客觀中性"
         )
-        self.model_name = "llama3.2"  # 添加默認模型名稱
+        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.model_name = os.getenv("OLLAMA_MODEL_NAME", "gpt-oss:20b")
         self.llm_client = self._setup_ollama_client()
         self.prompts = self.load_prompts()  # 添加這行來加載提示詞
 
@@ -31,7 +36,8 @@ class GradioNewsWorkflow:
         """設置Ollama客戶端"""
         try:
             from ollama import Client
-            return Client(host='http://localhost:11434')
+            print(f"🔗 連接到 Ollama: {self.ollama_base_url}")
+            return Client(host=self.ollama_base_url)
         except ImportError:
             print("警告：無法導入ollama，將使用模擬客戶端")
             return None
@@ -754,7 +760,7 @@ Beta分析：{beta_result}
                         with gr.Column():
                             gr.Markdown("#### 系統配置")
                             llm_provider_text = gr.Textbox(
-                                value="Ollama本地模型",
+                                value=self.ollama_base_url,
                                 label="LLM提供商",
                                 interactive=True
                             )
