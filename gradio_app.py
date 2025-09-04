@@ -91,15 +91,25 @@ class GradioNewsWorkflow:
             # 獲取模型列表
             response = temp_client.list()
             
-            # 根據Ollama API實際響應格式獲取模型名稱
-            if isinstance(response, dict) and 'models' in response:
-                model_names = [model['name'] for model in response['models']]
+            # 根據Ollama庫的實際響應格式獲取模型名稱
+            model_names = []
+            
+            if hasattr(response, 'models'):
+                # ollama庫返回的Model對象列表
+                models = response.models
+                model_names = [getattr(model, 'model', None) for model in models]
+            elif isinstance(response, dict) and 'models' in response:
+                # API直接返回的dict格式
+                models = response['models']
+                model_names = [model.get('name') for model in models if isinstance(model, dict)]
             elif isinstance(response, list):
-                # 某些版本的Ollama直接返回列表
-                model_names = [model['name'] for model in response]
-            else:
-                # 處理其他可能的響應格式
-                model_names = [model['name'] for model in response.models]
+                # 直接返回的list格式
+                model_names = [getattr(model, 'model', None) if hasattr(model, 'model') else 
+                              (model.get('name') if isinstance(model, dict) else str(model)) 
+                              for model in response]
+            
+            # 過濾掉None值
+            model_names = [name for name in model_names if name]
             
             if model_names:
                 return model_names, f"✅ 成功獲取 {len(model_names)} 個模型"
