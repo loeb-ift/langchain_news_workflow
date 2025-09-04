@@ -67,17 +67,38 @@ class GradioNewsWorkflow:
         except Exception as e:
             return f"❌ 配置更新失敗：{str(e)}"
 
-    def get_available_models(self) -> str:
-        """獲取可用的模型列表"""
+    def get_available_models(self) -> list:
+        """獲取可用的模型列表，返回列表格式"""
         try:
             models = self.llm_client.list()
             model_names = [model['name'] for model in models.get('models', [])]
-            if model_names:
-                return "可用模型：\n" + "\n".join(f"- {name}" for name in model_names)
-            else:
-                return "未找到可用模型"
+            return model_names if model_names else [self.model_name]
         except Exception as e:
-            return f"獲取模型列表失敗：{str(e)}"
+            print(f"獲取模型列表失敗：{str(e)}")
+            return [self.model_name]
+    
+    def refresh_models_from_host(self, host_url: str) -> tuple:
+        """從指定HOST刷新模型列表"""
+        try:
+            # 驗證URL格式
+            if not host_url.startswith('http'):
+                return [self.model_name], "❌ 錯誤：URL必須以http://或https://開頭"
+            
+            # 臨時創建客戶端獲取模型列表
+            from ollama import Client
+            temp_client = Client(host=host_url.rstrip('/'))
+            
+            # 獲取模型列表
+            models = temp_client.list()
+            model_names = [model['name'] for model in models.get('models', [])]
+            
+            if model_names:
+                return model_names, f"✅ 成功獲取 {len(model_names)} 個模型"
+            else:
+                return [self.model_name], "⚠️ 該HOST沒有可用模型"
+                
+        except Exception as e:
+            return [self.model_name], f"❌ 獲取模型列表失敗：{str(e)}"
         print("✅ Gradio新聞工作流程初始化完成")
     
     def load_prompts(self):
@@ -808,12 +829,14 @@ Beta分析：{beta_result}
                                 interactive=True,
                                 placeholder="例如：7860"
                             )
-                            model_name_text = gr.Textbox(
+                            model_dropdown = gr.Dropdown(
+                                choices=[self.model_name],
                                 value=self.model_name,
                                 label="使用模型",
                                 interactive=True,
-                                placeholder="例如：gpt-oss:20b"
+                                allow_custom_value=True
                             )
+                            refresh_models_btn = gr.Button("🔄 刷新模型列表", size="sm")
                             update_config_btn = gr.Button("🔄 更新配置", variant="primary")
                             config_status_text = gr.Textbox(
                                 label="配置狀態",
@@ -906,23 +929,40 @@ Beta分析：{beta_result}
             # 配置更新事件
             def update_system_config(new_base_url, new_model_name):
                 """更新系統配置"""
-                return self.update_config(new_base_url, new_model_name)
+                status = self.update_config(new_base_url, new_model_name)
+                # 更新模型下拉選單
+                models, _ = self.refresh_models_from_host(new_base_url)
+                return status, gr.Dropdown(choices=models, value=new_model_name)
             
+            def refresh_models_list(host_url):
+                """刷新模型列表"""
+                models, status_msg = self.refresh_models_from_host(host_url)
+                current_model = self.model_name if models and self.model_name in models else (models[0] if models else self.model_name)
+                return gr.Dropdown(choices=models, value=current_model), status_msg
+            
+            # 配置更新和模型刷新事件
             update_config_btn.click(
                 fn=update_system_config,
-                inputs=[llm_provider_text, model_name_text],
-                outputs=[config_status_text]
+                inputs=[llm_provider_text, model_dropdown],
+                outputs=[config_status_text, model_dropdown]
+            )
+            
+            refresh_models_btn.click(
+                fn=refresh_models_list,
+                inputs=[llm_provider_text],
+                outputs=[model_dropdown, config_status_text]
             )
             
             # 實時更新顯示值
             def refresh_config_display():
                 """刷新配置顯示"""
-                return self.ollama_base_url, self.model_name
+                models = self.get_available_models()
+                return self.ollama_base_url, gr.Dropdown(choices=models, value=self.model_name)
             
             # 頁面加載時刷新顯示
             app.load(
                 fn=refresh_config_display,
-                outputs=[llm_provider_text, model_name_text]
+                outputs=[llm_provider_text, model_dropdown]
             )
         
         return app
