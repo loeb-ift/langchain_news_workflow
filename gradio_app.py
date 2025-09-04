@@ -41,6 +41,43 @@ class GradioNewsWorkflow:
         except ImportError:
             print("警告：無法導入ollama，將使用模擬客戶端")
             return None
+
+    def update_config(self, new_base_url: str, new_model_name: str) -> str:
+        """動態更新Ollama配置"""
+        try:
+            # 驗證URL格式
+            if not new_base_url.startswith('http'):
+                return "❌ 錯誤：URL必須以http://或https://開頭"
+            
+            # 更新配置
+            self.ollama_base_url = new_base_url.rstrip('/')
+            self.model_name = new_model_name
+            
+            # 重新初始化Ollama客戶端
+            from ollama import Client
+            self.llm_client = Client(host=self.ollama_base_url)
+            
+            # 測試連接
+            try:
+                self.llm_client.list()
+                return f"✅ 配置更新成功！\nLLM提供商：{self.ollama_base_url}\n使用模型：{self.model_name}"
+            except Exception as e:
+                return f"⚠️ 配置已更新，但連接測試失敗：{str(e)}"
+                
+        except Exception as e:
+            return f"❌ 配置更新失敗：{str(e)}"
+
+    def get_available_models(self) -> str:
+        """獲取可用的模型列表"""
+        try:
+            models = self.llm_client.list()
+            model_names = [model['name'] for model in models.get('models', [])]
+            if model_names:
+                return "可用模型：\n" + "\n".join(f"- {name}" for name in model_names)
+            else:
+                return "未找到可用模型"
+        except Exception as e:
+            return f"獲取模型列表失敗：{str(e)}"
         print("✅ Gradio新聞工作流程初始化完成")
     
     def load_prompts(self):
@@ -762,30 +799,34 @@ Beta分析：{beta_result}
                             llm_provider_text = gr.Textbox(
                                 value=self.ollama_base_url,
                                 label="LLM提供商",
-                                interactive=True
+                                interactive=True,
+                                placeholder="例如：http://localhost:11434"
                             )
                             port_text = gr.Textbox(
                                 value="7860",
                                 label="服務端口",
-                                interactive=True
+                                interactive=True,
+                                placeholder="例如：7860"
                             )
                             model_name_text = gr.Textbox(
                                 value=self.model_name,
                                 label="使用模型",
-                                interactive=True
+                                interactive=True,
+                                placeholder="例如：gpt-oss:20b"
+                            )
+                            update_config_btn = gr.Button("🔄 更新配置", variant="primary")
+                            config_status_text = gr.Textbox(
+                                label="配置狀態",
+                                interactive=False,
+                                value="配置就緒"
                             )
                         
                         with gr.Column():
-                            gr.Markdown("#### 使用統計")
+                            gr.Markdown("#### 系統狀態")
                             system_status_text = gr.Textbox(
                                 value="就緒",
                                 label="系統狀態",
-                                interactive=True
-                            )
-                            processed_count_text = gr.Textbox(
-                                value=str(len(os.listdir("outputs"))) if os.path.exists("outputs") else "0",
-                                label="已處理文章數",
-                                interactive=True
+                                interactive=False
                             )
             
             # 設置事件處理
@@ -860,6 +901,28 @@ Beta分析：{beta_result}
                 fn=reset_to_default_prompt,
                 inputs=[stage_selector],
                 outputs=[prompt_editor, status_msg]
+            )
+            
+            # 配置更新事件
+            def update_system_config(new_base_url, new_model_name):
+                """更新系統配置"""
+                return self.update_config(new_base_url, new_model_name)
+            
+            update_config_btn.click(
+                fn=update_system_config,
+                inputs=[llm_provider_text, model_name_text],
+                outputs=[config_status_text]
+            )
+            
+            # 實時更新顯示值
+            def refresh_config_display():
+                """刷新配置顯示"""
+                return self.ollama_base_url, self.model_name
+            
+            # 頁面加載時刷新顯示
+            app.load(
+                fn=refresh_config_display,
+                outputs=[llm_provider_text, model_name_text]
             )
         
         return app
